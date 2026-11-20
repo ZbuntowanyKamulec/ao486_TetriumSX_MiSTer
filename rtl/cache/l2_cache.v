@@ -1,4 +1,9 @@
-
+// 64-bit CPU port for the Tetrium CPU (BUS_DW = 64), changed from ao486's 32-bit one:
+// CPU_ADDR is the 64-bit word address, CPU_BE one bit per byte; the cache rows and the DDR3 side
+// were 64 bit already, so writes and fills map 1:1 and a read burst returns one row per beat.
+// Single accesses that go to the VGA byte bus use the 32-bit half selected by CPU_BE (the core
+// issues one beat per 32-bit word for them). CPU_IDLE: the cache takes a request this cycle if
+// CPU_BUSY is low (the original leaves that to the master's own sequencing).
 module l2_cache #(parameter ADDRBITS = 24)
 (
 	input         CLK,
@@ -6,12 +11,13 @@ module l2_cache #(parameter ADDRBITS = 24)
 
 	input         DISABLE,
 
-	// CPU bus, master, 32bit
-	input  [29:0] CPU_ADDR,
-	input  [31:0] CPU_DIN,
-	output [31:0] CPU_DOUT,
+	// CPU bus, master, 64bit
+	input  [28:0] CPU_ADDR,
+	input  [63:0] CPU_DIN,
+	output [63:0] CPU_DOUT,
 	output        CPU_DOUT_READY,
-	input   [3:0] CPU_BE,
+	input   [7:0] CPU_BE,
+	output        CPU_IDLE,
 	input   [3:0] CPU_BURSTCNT,
 	output        CPU_BUSY,
 	input         CPU_RD,
@@ -82,7 +88,7 @@ localparam [3:0]
 	VGAWRITE      = 9;
 
 // memory
-wire              [31:0] readdata_cache[0:ASSOCIATIVITY-1];
+wire              [63:0] readdata_cache[0:ASSOCIATIVITY-1];
 reg      [ASSO_BITS-1:0] cache_mux;
 
 reg    [RAMSIZEBITS-1:0] memory_addr_b;
@@ -99,7 +105,6 @@ reg         [3:0] burst_left;
 reg         force_fetch;
 reg         force_next;
 
-reg         data64_high;
 
 // internal mux
 reg         ram_dout_ready;
@@ -143,7 +148,8 @@ assign DDRAM_BE       = ram_be;
 assign DDRAM_WE       = ram_we;
 
 assign CPU_BUSY       = (state == IDLE) ? DDRAM_BUSY : (vgabusy | ram_we);
-assign CPU_DOUT       = vga_ram ? vga_data_r : readdata_cache[cache_mux];
+assign CPU_DOUT       = vga_ram ? {vga_data_r, vga_data_r} : readdata_cache[cache_mux];
+assign CPU_IDLE       = (state == IDLE);
 assign CPU_DOUT_READY = ram_dout_ready;
 
 assign VGA_DOUT       = vga_data[7:0];
@@ -185,13 +191,17 @@ always @(posedge CLK) begin
 	endcase
 end
 
-wire ram_rgn = !CPU_ADDR[29:ADDRBITS+2];                                                       // = below 256MB
-wire rom_rgn = uma_ram ? (CPU_ADDR[ADDRBITS+1:14] == 'hC) || (CPU_ADDR[ADDRBITS+1:14] == 'hF)  // = 0xC0000-0xCFFFF (VGA-ROM), 0xD0000-0xEFFFF (UMA RAM), 0xF0000-0xFFFFF (BIOS-ROM)
-                       : (CPU_ADDR[ADDRBITS+1:16] == 'h3);                                     // = 0xC0000-0xFFFFF (VGA-ROM...BIOS-ROM) (UMA RAM disabled)
-wire vga_rgn = (CPU_ADDR[ADDRBITS+1:15] == 'h5)  && ((CPU_ADDR[14:13] & vga_mask) == vga_cmp); // = 0xA0000-0xBFFFF (VGA: exact region depends on VGA_MODE)
-wire shr_rgn = (CPU_ADDR[ADDRBITS+1:11] == 'h67) && shr_rgn_en;                                // = 0xCE000-0xCFFFF (used by shared folder)
+wire        hi32     = ~|CPU_BE[3:0];
+wire [29:0] CPU_A32  = {CPU_ADDR, hi32};
+wire [31:0] CPU_D32  = hi32 ? CPU_DIN[63:32] : CPU_DIN[31:0];
+wire  [3:0] CPU_BE32 = hi32 ? CPU_BE[7:4] : CPU_BE[3:0];
 
-wire [7:0] be64 = CPU_ADDR[0] ? {CPU_BE, 4'h0} : {4'h0, CPU_BE};
+wire ram_rgn = !CPU_A32[29:ADDRBITS+2];                                                       // = below 256MB
+wire rom_rgn = uma_ram ? (CPU_A32[ADDRBITS+1:14] == 'hC) || (CPU_A32[ADDRBITS+1:14] == 'hF)  // = 0xC0000-0xCFFFF (VGA-ROM), 0xD0000-0xEFFFF (UMA RAM), 0xF0000-0xFFFFF (BIOS-ROM)
+                       : (CPU_A32[ADDRBITS+1:16] == 'h3);                                     // = 0xC0000-0xFFFFF (VGA-ROM...BIOS-ROM) (UMA RAM disabled)
+wire vga_rgn = (CPU_A32[ADDRBITS+1:15] == 'h5)  && ((CPU_A32[14:13] & vga_mask) == vga_cmp); // = 0xA0000-0xBFFFF (VGA: exact region depends on VGA_MODE)
+wire shr_rgn = (CPU_A32[ADDRBITS+1:11] == 'h67) && shr_rgn_en;                                // = 0xCE000-0xCFFFF (used by shared folder)
+
 
 always @(posedge CLK) begin
 	reg [ASSO_BITS:0] i;
@@ -260,29 +270,28 @@ always @(posedge CLK) begin
 					if (!DDRAM_BUSY) begin
 						
 						// for timing purposes, most registers are assigned without region checks
-						CPU_ADDR_1    <= CPU_ADDR;
-						CPU_DIN_1     <= CPU_DIN;
+						CPU_ADDR_1    <= CPU_A32;
+						CPU_DIN_1     <= CPU_D32;
 						CPU_WE_1      <= CPU_WE;
 
-						ram_addr      <= CPU_ADDR[ADDRBITS+1:1];
+						ram_addr      <= CPU_ADDR[ADDRBITS:0];
 						ram_burstcnt  <= 8'h01;
-						read_addr     <= CPU_ADDR[ADDRBITS+1:1];
+						read_addr     <= CPU_ADDR[ADDRBITS:0];
 						burst_left    <= CPU_BURSTCNT;
-						data64_high   <= CPU_ADDR[0];
 
-						vga_wa        <= CPU_ADDR[14:0];
+						vga_wa        <= CPU_A32[14:0];
 						vga_bcnt      <= 3;
-						vga_next_data <= CPU_DIN;
-						vga_next_be   <= CPU_BE;
+						vga_next_data <= CPU_D32;
+						vga_next_be   <= CPU_BE32;
 						vga_ba        <= 2'b00;
-						vga_be        <= CPU_BE;
+						vga_be        <= CPU_BE32;
 
-						ram_din       <= {CPU_DIN, CPU_DIN};
-						ram_be        <= be64;
+						ram_din       <= CPU_DIN;
+						ram_be        <= CPU_BE;
 
-						memory_datain <= {CPU_DIN, CPU_DIN};
-						memory_be     <= be64;
-						memory_addr_b <= CPU_ADDR[RAMSIZEBITS:1];
+						memory_datain <= CPU_DIN;
+						memory_be     <= CPU_BE;
+						memory_addr_b <= CPU_ADDR[RAMSIZEBITS-1:0];
 
 						read_behind   <= ~ram_rgn;
 						force_fetch   <= shr_rgn | DISABLE;
@@ -360,8 +369,7 @@ always @(posedge CLK) begin
 									if (burst_left > 1) begin
 										state       <= READONE;
 										burst_left  <= burst_left - 1'd1;
-										data64_high <= ~data64_high;
-										if (data64_high) read_addr <= read_addr + 1'd1;
+										read_addr   <= read_addr + 1'd1;
 									end
 									else begin
 										state <= IDLE;
@@ -582,16 +590,16 @@ generate
 			.intended_device_family("Cyclone V"),
 			.lpm_type("altsyncram"),
 			.numwords_a(2**RAMSIZEBITS),
-			.numwords_b(2**(RAMSIZEBITS+1)),
+			.numwords_b(2**RAMSIZEBITS),
 			.operation_mode("DUAL_PORT"),
 			.outdata_aclr_b("NONE"),
 			.outdata_reg_b("UNREGISTERED"),
 			.power_up_uninitialized("FALSE"),
 			.read_during_write_mode_mixed_ports("DONT_CARE"),
 			.widthad_a(RAMSIZEBITS),
-			.widthad_b(RAMSIZEBITS+1),
+			.widthad_b(RAMSIZEBITS),
 			.width_a(64),
-			.width_b(32),
+			.width_b(64),
 			.width_byteena_a(8)
 		)
 		ram (
@@ -602,7 +610,7 @@ generate
 			.data_a(memory_datain),
 			.wren_a(memory_we[i]),
 
-			.address_b({read_addr[RAMSIZEBITS - 1:0], data64_high}),
+			.address_b(read_addr[RAMSIZEBITS - 1:0]),
 			.q_b(readdata_cache[i]),
 
 			.aclr0(1'b0),
@@ -615,7 +623,7 @@ generate
 			.clocken1(1'b1),
 			.clocken2(1'b1),
 			.clocken3(1'b1),
-			.data_b(32'b0),
+			.data_b(64'b0),
 			.eccstatus(),
 			.q_a(),
 			.rden_a(1'b1),

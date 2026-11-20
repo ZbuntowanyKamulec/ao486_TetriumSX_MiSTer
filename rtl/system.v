@@ -5,6 +5,7 @@ module system
 
 	input         clk_sys,
 	input  [27:0] clock_rate,
+	input   [1:0] cpu_clk_div,
 
 	input         l1_disable,
 	input         l2_disable,
@@ -270,10 +271,11 @@ wire  [7:0] dma_io_readdata;
 wire  [7:0] pic_readdata;
 wire  [7:0] vga_io_readdata;
 
-wire [29:0] mem_address;
-wire [31:0] mem_writedata;
-wire [31:0] mem_readdata;
-wire  [3:0] mem_byteenable;
+wire [28:0] mem_address;
+wire [63:0] mem_writedata;
+wire [63:0] mem_readdata;
+wire  [7:0] mem_byteenable;
+wire        mem_idle;
 wire  [3:0] mem_burstcount;
 wire        mem_write;
 wire        mem_read;
@@ -305,6 +307,7 @@ l2_cache cache
 	.CPU_BE            (mem_byteenable),
 	.CPU_BURSTCNT      (mem_burstcount),
 	.CPU_BUSY          (mem_waitrequest),
+	.CPU_IDLE          (mem_idle),
 	.CPU_RD            (mem_read),
 	.CPU_WE            (mem_write),
 
@@ -332,10 +335,11 @@ l2_cache cache
 	.uma_ram           (uma_ram)
 );
 
-ao486 ao486
+tetrium_ao486 ao486
 (
 	.clk               (clk_sys),
 	.rst_n             (~reset),
+	.clk_div           (cpu_clk_div),
 
 	.cache_disable     (l1_disable),
 
@@ -346,6 +350,7 @@ ao486 ao486
 	.avm_write         (mem_write),
 	.avm_read          (mem_read),
 	.avm_waitrequest   (mem_waitrequest),
+	.avm_idle          (mem_idle),
 	.avm_readdatavalid (mem_readdatavalid),
 	.avm_readdata      (mem_readdata),
 
@@ -406,7 +411,7 @@ reg [7:0] ctlport = 0;
 always @(posedge clk_sys) begin
 	reg in_reset = 1;
 	if(reset) begin
-		ctlport <= 8'hA2;
+		ctlport <= 8'h00;   // ao486: A2 (CPU index 2 = 30 MHz, L2 off until the first disk access)
 		in_reset <= 1;
 	end
 	else if((ide0_cs|ide1_cs|floppy0_cs) && in_reset) begin
