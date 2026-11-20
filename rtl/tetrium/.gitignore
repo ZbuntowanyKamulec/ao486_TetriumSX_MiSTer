@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 ZbuntowanyKamulec
+# build outputs
+build/
+# external sources and test suites (tests/fetch.sh)
+ref/
+# converted SingleStepTests (tests/conv386.sh)
+tests/bin
+__pycache__/
+*.log
