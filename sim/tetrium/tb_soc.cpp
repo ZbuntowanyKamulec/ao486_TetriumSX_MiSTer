@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 ZbuntowanyKamulec
+//
 // ao486 SoC + Tetrium simulation (Verilator) with an SDL window showing the VGA output.
 // Plays the MiSTer HPS (Main_MiSTer support/x86/x86.cpp): BIOS images into the DDR3 model,
 // CMOS / floppy configuration through the mgmt bus, PS/2 keyboard host side; IDE: ide.cpp port

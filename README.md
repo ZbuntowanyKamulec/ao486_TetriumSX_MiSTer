@@ -1,32 +1,35 @@
-# ao486 with the TetriumSX CPU for MiSTer
+# ao486 TetriumSX for MiSTer
 
-The ao486 core with its CPU replaced by [Tetrium](https://github.com/ZbuntowanyKamulec/Tetrium)
-(TetriumSX, integer only), a pipelined i486-compatible CPU: about two to three times as fast as
-ao486 in most programs. The BIOS, VGA, sound, disks and OSD are ao486's; the ao486 README below
-still applies, updated where the CPU matters.
+ao486 with its CPU replaced by [Tetrium](https://github.com/ZbuntowanyKamulec/Tetrium): about
+2-3x as fast as stock ao486 in most programs. Integer only (no FPU), like a 486SX. Everything
+else (BIOS, VGA, sound, disks, OSD) is ao486's, and the ao486 README below still applies.
 
-- CPU at 69.23 MHz, 16 KB instruction and 16 KB data caches, branch prediction, 64-bit path to
-  the L2 cache. No FPU, like a 486SX.
-- CPU Clock in the main OSD menu: 69, 35, 17 or 8.7 MHz (the system clock stays the same, so
-  sound and timers are unaffected). L2 Cache On / Off under Hardware.
-- Uses the same files and folders as ao486 (`games/ao486`, `boot0.rom`, `boot1.rom`). The core
-  reports itself as AO486, so it shares ao486's settings file; CPU Clock and L2 Cache are stored
-  separately, so stock ao486 keeps its own speed settings. Keep a copy of the stock core.
-- Needs the BIOS from 2026-11-20 or newer: copy [boot0.rom](releases/boot0.rom) to
-  `games/ao486`. With an older one, programs that use the BIOS wait function (INT 15h AH=86h)
-  hang, e.g. Windows 98 at the code page screen.
+## Installation
+
+- Copy `ao486_TetriumSX_<date>.rbf` from `releases` to `_Computer` on the SD card.
+- Copy [boot0.rom](releases/boot0.rom) to `games/ao486`. The BIOS must be from 2026-11-20 or
+  newer: with an older one, programs that use the BIOS wait function hang (e.g. Windows 98 at
+  the code page screen). Stock ao486 works with the new BIOS too.
+
+The core uses ao486's folder and settings file, but keeps its own CPU Clock and L2 Cache
+settings, so stock ao486's settings are not affected.
+
+## Settings
+
+- CPU Clock (main menu): 69, 35, 17 or 8.7 MHz
+- L2 Cache (Hardware): On / Off
 
 ## Performance
 
-On a MiSTer, compared with stock ao486 (90 MHz) on the same system. The gain depends on the
-program. Code that runs from the CPU's caches gains the most. Everything outside them is
-ao486's (L2 cache, memory, VGA, disks), so programs that spend much of their time on memory or
-video writes gain less. Most programs fall between the first and the last row:
+Stock ao486 (90 MHz) and TetriumSX (69 MHz) on the same MiSTer. Code that runs from the CPU's
+caches gains the most; memory, video and disk access are still ao486's, so programs that spend
+much of their time on them gain less. Most programs fall between the first and the last row.
 
 | Program | ao486 | TetriumSX | |
 |---|---|---|---|
-| Duke Nukem 3D, 320×200, frame counter | 16 FPS | 28 FPS | 1.75× |
+| Duke Nukem 3D, 320×200, default settings | 16 FPS | 28 FPS | 1.75× |
 | Doom 1.9, `-timedemo demo3`, high detail, full screen | 20.92 FPS | 37.49 FPS | 1.8× |
+| CPU-Z 1.04 Vintage Edition, Windows 98 SE | ~34 | ~101 | 3× |
 | System Information (Norton Utilities), CPU speed index | 69 | 299 | 4.3× |
 
 <table>
@@ -39,23 +42,27 @@ video writes gain less. Most programs fall between the first and the last row:
 <td><img src="doc/benchmarks/superscape.png" width="360"><br>Superscape VRP benchmark: 100.1 FPS</td>
 </tr>
 <tr>
-<td><img src="doc/benchmarks/duke3d.png" width="360"><br>Duke Nukem 3D: 28 FPS (frame counter top left)</td>
+<td><img src="doc/benchmarks/duke3d.png" width="360"><br>Duke Nukem 3D: 28 FPS (top left)</td>
 <td></td>
 </tr>
 </table>
 
-## Source and credits
+## Source
 
-`rtl/tetrium` is the CPU (a subtree of the Tetrium repository, update with
-`git subtree pull --prefix=rtl/tetrium https://github.com/ZbuntowanyKamulec/Tetrium main --squash`;
-CPU changes go there), `rtl/tetrium_ao486.sv` connects it to the SoC, `rtl/cache/l2_cache.v`
-has a 64-bit CPU port, and `sim/tetrium` is a Verilator simulation of the whole SoC. Build with
-Quartus 17.0 as described below.
+- `rtl/tetrium`: the CPU, a subtree of the [Tetrium](https://github.com/ZbuntowanyKamulec/Tetrium)
+  repository. CPU changes go there, then:
+  `git subtree pull --prefix=rtl/tetrium https://github.com/ZbuntowanyKamulec/Tetrium main --squash`
+- `rtl/tetrium_ao486.sv`: connects the CPU to the ao486 system; `rtl/cache/l2_cache.v` has a
+  64-bit CPU port.
+- `sim/tetrium`: Verilator simulation of the whole system.
 
-ao486 by Aleksander Osman (BSD license), MiSTer port by Sorgelig and contributors; Tetrium by
-ZbuntowanyKamulec (GPL-3.0-or-later). Files keep their own license notices; the core as a whole
-is distributed under GPL-3.0-or-later. Tetrium and its integration here were written largely
-with Claude (Anthropic) and verified by lockstep testing against 86Box and on hardware.
+Build with Quartus 17.0, see "Building core" below.
+
+## Credits and license
+
+ao486 by Aleksander Osman, MiSTer port by Sorgelig and contributors. Tetrium by
+ZbuntowanyKamulec, written largely with Claude (Anthropic) and verified by lockstep testing
+against 86Box and on hardware. The core is distributed under GPL-3.0-or-later; see `LICENSE`.
 
 ---
 
@@ -79,7 +86,7 @@ Original Core [repository](https://github.com/alfikpl/ao486)
 
 ## How to install
 
-* Copy ao486.rbf to the _Computer folder on your SD card.  This will be automatically copied there if you are using the update script.
+* Copy the .rbf to the _Computer folder on your SD card (see Installation at the top).
 * Create games/ao486/ directory on SD card and copy [boot0.rom](https://github.com/MiSTer-devel/ao486_MiSTer/blob/master/releases/boot0.rom), [boot1.rom](https://github.com/MiSTer-devel/ao486_MiSTer/blob/master/releases/boot1.rom) there.
 * For CD images, the typical location is games/ao486/cd/ and you can either have the game folders, or CHD, IMG, ISO, BIN/CUE files in the root for mounting.  The imgset command can be used in DOS to mount/unmount images placed here by passing the exact path.
 * For floppy: copy desired floppy raw image with extension **img** to games/ao486/floppy/ directory.  The imgset command can be used in DOS to mount/unmount images placed here by passing the exact path.

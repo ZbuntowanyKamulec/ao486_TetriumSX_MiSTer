@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 ZbuntowanyKamulec
 """Sim copies of SoC sources: Verilator (5.020) re-runs the initialiser of a reg declared inside
 an always block every time the block runs (IEEE: once, static). Drop those initialisers (the
 registers start at 0 under --x-initial fast; the resets set the ones that matter).

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 ZbuntowanyKamulec; based on Main_MiSTer (GPL-3.0)
+//
 // HPS side of the ao486 IDE controller (rtl/soc/ide.v) for the simulation: a port of the
 // hard-disk parts of Main_MiSTer ide.cpp (no CD-ROM, no placeholders).
 #pragma once

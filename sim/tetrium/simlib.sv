@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 ZbuntowanyKamulec
+//
 // Simulation models (Verilator) of the Altera RAM primitives the ao486 SoC uses, only in the
 // modes it uses them in: altdpram (L2 tags / dirty / LRU: registered write, unregistered read),
 // altsyncram DUAL_PORT (L2 rows: write port A with byte enables, read port B with a registered

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 ZbuntowanyKamulec; based on Main_MiSTer (GPL-3.0)
+//
 // Port of the hard-disk parts of Main_MiSTer ide.cpp (ide_img_set, ide_io, handle_hdd and the
 // read / write block transfers) for the simulation; register layout and identify data as there.
 #include "ide_hps.h"

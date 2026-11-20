@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 ZbuntowanyKamulec
+//
 // Simulation top: the ao486 SoC (rtl/system.v with Tetrium + the 64-bit L2), clk_sys for
 // everything (UART / MPU / audio clocks too) except clk_vga = 2 x clk_sys, MiSTer's PS/2 keyboard device
 // (sys/hps_io.sv ps2_device) driven by the testbench, sound / GUS / UART / MPU stubbed.

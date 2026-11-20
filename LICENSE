@@ -1,3 +1,9 @@
+TetriumSX: the Tetrium CPU (rtl/tetrium, see rtl/tetrium/COPYING), rtl/tetrium_ao486.sv and
+sim/tetrium are licensed under the GPL, version 3 or later (sim/tetrium/ide_hps.*: version 3,
+based on Main_MiSTer). The core as a whole is distributed under GPL-3.0-or-later.
+
+--------------------------------------------------------------------------------
+
 All files in the following directories:
 - rtl
 - ao486_tool
