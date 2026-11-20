@@ -1,3 +1,40 @@
+# ao486 with the TetriumSX CPU for MiSTer
+
+The ao486 core with its CPU replaced by [Tetrium](https://github.com/ZbuntowanyKamulec/Tetrium)
+(TetriumSX, integer only): a pipelined i486-compatible CPU that runs integer code at about
+Pentium speed per clock. The BIOS, VGA, sound, disks and OSD are ao486's; the ao486 README below
+still applies, updated where the CPU matters.
+
+- CPU at 69.23 MHz, 16 KB instruction and 16 KB data caches, branch prediction, 64-bit path to
+  the L2 cache. No FPU, like a 486SX.
+- Doom 1.9 (`-timedemo demo3`, high detail, full screen): 37.55 FPS. 3DBench 1.0c: 99.9 FPS.
+  CPU-Z 1.04 Vintage Edition in Windows 98 SE: 101.5 (Pentium 75 reference: 98.0).
+- CPU Clock in the main OSD menu: 69, 35, 17 or 8.7 MHz (the system clock stays the same, so
+  sound and timers are unaffected). L2 Cache On / Off under Hardware.
+- Uses the same files and folders as ao486 (`games/ao486`, `boot0.rom`, `boot1.rom`). The core
+  reports itself as AO486, so it shares ao486's settings file; CPU Clock and L2 Cache are stored
+  separately, so stock ao486 keeps its own speed settings. Keep a copy of the stock core.
+
+Known issues:
+
+- No FPU: software that requires one (e.g. Quake) doesn't run.
+- Disk access is slow (as on ao486: every sector goes through the MiSTer's ARM side).
+- Windows 98 non-Plug-and-Play hardware detection hung once (cause not known yet).
+
+Source: `rtl/tetrium` is the CPU (a subtree of the Tetrium repository, update with
+`git subtree pull --prefix=rtl/tetrium https://github.com/ZbuntowanyKamulec/Tetrium main --squash`;
+CPU changes go there), `rtl/tetrium_ao486.sv` connects it to the SoC, `rtl/cache/l2_cache.v`
+has a 64-bit CPU port, and `sim/tetrium` is a Verilator simulation of the whole SoC. Build with
+Quartus 17.0 as described below.
+
+Credits and license: ao486 by Aleksander Osman (BSD license), MiSTer port by Sorgelig and
+contributors; Tetrium by ZbuntowanyKamulec (GPL-3.0-or-later). Files keep their own license
+notices; the core as a whole is distributed under GPL-3.0-or-later. Tetrium and its integration
+here were written largely with Claude (Anthropic) and verified by lockstep testing against
+86Box and on hardware.
+
+---
+
 # ao486 port for MiSTer by Sorgelig.
 
 MiSTer port of the ao486 core originally written by Aleksander Osman, which has been greatly reworked with many new features and performance added.
@@ -5,7 +42,7 @@ MiSTer port of the ao486 core originally written by Aleksander Osman, which has 
 Original Core [repository](https://github.com/alfikpl/ao486)
 
 ## Features:
-* 486SX33 performance (no-FPU).
+* TetriumSX CPU at 69 MHz, about Pentium 75 performance (no FPU).
 * 256MB RAM
 * SVGA with up to 1280x1024@256, 1024x768@64K, 640x480@16M resolutions
 * Sound Blaster 16 (DSP v4.05) and Sound Blaster Pro (DSP v3.02) with OPL3 and C/MS
@@ -31,14 +68,13 @@ HDD image is a raw image with MBR. It can be opened in Windows/Linux by many app
 so it's possible to prepare a HDD in windows/linux (in most cases you need to work with .img files, then just rename it to .vhd extension)
 
 ### Core Speed and Options and Drivers
-The default core speed is set to 90Mhz with both L1 and L2 caches enabled.  This will give you the maximum speed for the release version of ao486.  Some games, especially older games, are sensitive to speed and cache so you can change the speed options and cache to fit the game.
+The default CPU clock is 69MHz with the L2 cache enabled.  Some games, especially older games, are sensitive to speed and cache so you can change the CPU clock and cache to fit the game.
 Optionally you can use the sysctl.exe program to automatically change these settings before launching your game.  This is especially useful for batch scripts where you want to change those options and then set it back after the game exits.
 
-Core options under Hardware:
-* CPU Clock: 15MHz, 30Mhz, 56MHz, 90Mhz (90MHz)
-* L1 Cache: On, Off (On)
-* L2 Cache: On, Off (On)
-* RAM Size: 256MB, 16MB (256MB)
+Core options:
+* CPU Clock (main menu): 69MHz, 35MHz, 17MHz, 8.7MHz (69MHz)
+* L2 Cache (Hardware): On, Off (On)
+* RAM Size (Hardware): 256MB, 16MB (256MB)
 
 Optional programs and drivers:  https://github.com/MiSTer-devel/ao486_MiSTer/tree/master/releases/drv
 * MISTERFB.DRV/INF: Windows Video Driver
@@ -47,12 +83,12 @@ Optional programs and drivers:  https://github.com/MiSTer-devel/ao486_MiSTer/tre
 * modem9x.inf: Used for Windows modem setup.
 * mpuctl.exe: tool for sending commands to the optional mt32-pi baremetal synth.  See reference below.
 * sbctl.exe: set Sound Blaster configs.  Supported: I5,I7,I10,H5,H1,T4,T6
-* sysctl.exe: Used for setting core options and cache referenced above from command line. Usase: SYSCTL SYS/MENU 90Mhz/56Mhz/15Mhz L1+/L1- L2+/L2-
+* sysctl.exe: Used for setting core options and cache referenced above from command line. Usase: SYSCTL SYS/MENU 90Mhz/56Mhz/15Mhz L1+/L1- L2+/L2-  (with TetriumSX: 90/56/30/15 select a CPU clock of 69/35/17/8.7 MHz; L1 has no effect)
 
 ### Gravis UltraSound
 Default config: baseport=240, IRQ1=7, IRQ2=7, DMA1=7, DMA2=7. (SET ULTRASND=240,7,7,7,7)
 If you changed(sbctl.exe tool) SB IRQ to 7, GUS IRQ1&2 changed to 5.
-Supported GUS 1MB DRAM(required SDRAM module). Any CPU frequency, except 15MHz(too slow).
+Supported GUS 1MB DRAM(required SDRAM module). Any CPU clock setting.
 
 ### Sound Blaster
 Default config: A220 I5 D1 H5 T6
