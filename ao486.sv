@@ -61,7 +61,7 @@ localparam CONF_STR =
 	"S4,VHDISOCUECHD,IDE 1-0;",
 	"S5,VHDISOCUECHD,IDE 1-1;",
 	"-;",
-	"oJM,CPU Preset,User Defined,~PC XT-7MHz,~PC AT-8MHz,~PC AT-10MHz,~PC AT-20MHz,~PS/2-20MHz,~386SX-25MHz,~386DX-33Mhz,~386DX-40Mhz,~486SX-33Mhz,~486DX-33Mhz,MAX (unstable);",
+	"D2O[126:125],CPU Clock,69MHz,35MHz,17MHz,8.7MHz;",
 	"-;",
 	"P1,Audio & Video;",
 	"P1-;",
@@ -92,11 +92,8 @@ localparam CONF_STR =
 	"P2OB,RAM Size,256MB,16MB;",
 	"P2oP,D0000h-EFFFFh RAM,Off,On;",
 `ifndef DEBUG
-	"H5P2-;",
-	"H5D2D1P2O56,CPU Clock,90MHz,15MHz,30MHz,56MHz;",
-	"H5h0P2O7,Overclock,Off,100Mhz;",
-	"H5D2P2OF,L1 Cache,On,Off;",
-	"H5D2P2OG,L2 Cache,On,Off;",
+	"P2-;",
+	"D2P2O[127],L2 Cache,On,Off;",
 `endif
 	"P2-;",
 	"P2OA,USER I/O,MIDI,COM2;",
@@ -152,7 +149,7 @@ wire        ps2_mouse_clk_in;
 wire        ps2_mouse_data_in;
 
 wire  [1:0] buttons;
-wire [63:0] status;
+wire [127:0] status;
 
 wire [13:0] joystick_0;
 wire [13:0] joystick_1;
@@ -183,7 +180,7 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .PS2DIV(2000), .PS2WE(1), .WIDE
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({|status[54:51],mt32_newmode,mt32_available,syscfg[7],status[7],dbg_menu}),
+	.status_menumask({1'b0,mt32_newmode,mt32_available,syscfg[7],1'b0,dbg_menu}),
 	.info_req(mt32_info_req),
 	.info(mt32_info_disp),
 
@@ -234,6 +231,7 @@ hps_ext hps_ext
 
 wire clk_sys, clk_uart1, clk_uart2, clk_mpu, clk_vga;
 reg [27:0] cur_rate;
+reg  [1:0] cpu_div;
 
 `ifdef DEBUG
 
@@ -249,6 +247,7 @@ pll2 pll
 );
 
 always @(posedge clk_sys) cur_rate <= 30000000;
+always @(posedge clk_sys) cpu_div <= 2'd0;
 
 `else
 
@@ -292,33 +291,20 @@ pll_cfg pll_cfg
 
 reg [2:0] clk_req;
 reg l1, l2;
+// CPU clock and L2 on status bits of their own (ao486 keeps its CPU Clock / Preset / cache
+// bits; both cores share the AO486 config file). syscfg (software control) keeps ao486's speed
+// index: 0 = full, 3 / 2 / 1 = 1/2, 1/4, 1/8.
 always @(posedge clk_sys) begin
-	case(status[54:51])
-		'd1: begin clk_req <= 'd3; l1 <= 1'b1; l2 <= 1'b1; end  // ao486 XT 7
-		'd2: begin clk_req <= 'd1; l1 <= 1'b1; l2 <= 1'b0; end  // ao486 AT 8
-		'd3: begin clk_req <= 'd2; l1 <= 1'b0; l2 <= 1'b1; end  // ao486 AT 10
-		'd4: begin clk_req <= 'd2; l1 <= 1'b1; l2 <= 1'b0; end  // ao486 AT 20
-		'd5: begin clk_req <= 'd1; l1 <= 1'b0; l2 <= 1'b0; end  // ao486 PS/2 20
-		'd6: begin clk_req <= 'd3; l1 <= 1'b1; l2 <= 1'b0; end  // ao486 3SX 25
-		'd7: begin clk_req <= 'd2; l1 <= 1'b0; l2 <= 1'b0; end  // ao486 3DX 33
-		'd8: begin clk_req <= 'd0; l1 <= 1'b1; l2 <= 1'b0; end  // ao486 3DX 40
-		'd9: begin clk_req <= 'd3; l1 <= 1'b0; l2 <= 1'b0; end  // ao486 4SX 33
-		'd10: begin clk_req <= 'd0; l1 <= 1'b0; l2 <= 1'b0; end // ao486 MAX (stable)
-		'd11: begin clk_req <= 'd4; l1 <= 1'b0; l2 <= 1'b0; end // ao486 MAX+ (unstable)
-		default: begin
-		// CPU & Cache config
-		clk_req <= {status[7], syscfg[7] ? syscfg[1:0] : status[6:5]};
-		l1 <= syscfg[7] ? syscfg[4] : status[15];
-		l2 <= syscfg[7] ? syscfg[5] : status[16];
-		end
-	endcase
+	clk_req <= {1'b0, syscfg[7] ? syscfg[1:0] : 2'd0 - status[126:125]};
+	l1 <= syscfg[7] ? syscfg[4] : 1'b0;
+	l2 <= syscfg[7] ? syscfg[5] : status[127];
 end
 
 reg [2:0] speed;
 always @(posedge CLK_50M) begin
 	reg [2:0] sp1, sp2;
 
-	sp1 <= clk_req;
+	sp1 <= 3'd0;   // clk_sys fixed: the CPU clock is divided in system (cpu_div)
 	sp2 <= sp1;
 
 	if(sp2 == sp1) speed <= sp2;
@@ -337,8 +323,8 @@ always @(posedge CLK_50M) begin
 	if(sp2 == sp1) uspeed <= sp2;
 end
 
-(* romstyle = "logic" *) wire [27:0] clk_rate[8]  = '{90000000, 15000000, 30000000, 56250000, 100000000, 100000000, 100000000, 100000000 };
-(* romstyle = "logic" *) wire [17:0] speed_div[8] = '{  'h0505,   'h1e1e,   'h0f0f,   'h0808,   'h20504,   'h20504,   'h20504,   'h20504 };
+(* romstyle = "logic" *) wire [27:0] clk_rate[8]  = '{69230769, 69230769, 69230769, 69230769, 69230769, 69230769, 69230769, 69230769};
+(* romstyle = "logic" *) wire [17:0] speed_div[8] = '{'h20706, 'h20706, 'h20706, 'h20706, 'h20706, 'h20706, 'h20706, 'h20706};
 
 always @(posedge CLK_50M) begin
 	reg [2:0] old_speed = 0;
@@ -384,7 +370,10 @@ always @(posedge CLK_50M) begin
 	end
 end
 
-always @(posedge clk_sys) cur_rate <= clk_rate[clk_req];
+always @(posedge clk_sys) cur_rate <= clk_rate[0];
+
+// CPU clock = clk_sys / 2^cpu_div (clk_req: ao486's speed index, see above)
+always @(posedge clk_sys) cpu_div <= 2'd0 - clk_req[1:0];
 
 `endif
 
@@ -585,6 +574,7 @@ system system
 	.reset                (reset),
 
 	.clock_rate           (cur_rate),
+	.cpu_clk_div          (cpu_div),
 
 	.syscfg               (syscfg),
 	.l1_disable           (l1),
@@ -748,7 +738,6 @@ always @(posedge clk_sys) begin
 		esc <= 0;
 	end
 
-	if(status[7]) dbg_menu <= 1;
 end
 
 
