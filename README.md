@@ -19,11 +19,13 @@ still applies, updated where the CPU matters.
 ## Performance
 
 On a MiSTer, compared with stock ao486 (90 MHz) on the same system. The gain depends on the
-program: CPU-bound code gains the most, programs that spend much of their time writing to video
-memory the least (the VGA, L2 cache and disks are ao486's). Most programs fall between these two:
+program. Code that runs from the CPU's caches gains the most. Everything outside them is
+ao486's (L2 cache, memory, VGA, disks), so programs that spend much of their time on memory or
+video writes gain less. Most programs fall between the first and the last row:
 
 | Program | ao486 | TetriumSX | |
 |---|---|---|---|
+| Duke Nukem 3D, 320×200, frame counter | 16 FPS | 28 FPS | 1.75× |
 | Doom 1.9, `-timedemo demo3`, high detail, full screen | 20.92 FPS | 37.49 FPS | 1.8× |
 | System Information (Norton Utilities), CPU speed index | 69 | 299 | 4.3× |
 
@@ -34,10 +36,10 @@ memory the least (the VGA, L2 cache and disks are ao486's). Most programs fall b
 </tr>
 <tr>
 <td><img src="doc/benchmarks/pcpbench.png" width="360"><br>PC Player Benchmark, VGA: 16.3 FPS</td>
-<td><img src="doc/benchmarks/superscape.png" width="360"><br>Superscape VRP benchmark</td>
+<td><img src="doc/benchmarks/superscape.png" width="360"><br>Superscape VRP benchmark: 100.1 FPS</td>
 </tr>
 <tr>
-<td><img src="doc/benchmarks/duke3d.png" width="360"><br>Duke Nukem 3D (frame rate top left)</td>
+<td><img src="doc/benchmarks/duke3d.png" width="360"><br>Duke Nukem 3D: 28 FPS (frame counter top left)</td>
 <td></td>
 </tr>
 </table>
