@@ -1,4 +1,9 @@
 set_global_assignment -name QIP_FILE rtl/pll2.qip
+# Tetrium: Altera RAM primitives, microcode ROM ($readmemh paths are relative to the project
+# directory), RAM initial-value loops above the default 5000 iterations
+set_global_assignment -name VERILOG_MACRO "ALTERA=1"
+set_global_assignment -name VERILOG_MACRO "UCODE_FILE=\"rtl/tetrium/rtl/gen/ucode_rom.hex\""
+set_global_assignment -name VERILOG_CONSTANT_LOOP_LIMIT 1000000
 set_global_assignment -name QIP_FILE rtl/tetrium.qip
 set_global_assignment -name QIP_FILE rtl/cache/cache.qip
 set_global_assignment -name QIP_FILE rtl/soc/uart/uart.qip
