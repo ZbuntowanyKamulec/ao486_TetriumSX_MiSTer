@@ -47,6 +47,12 @@ much of their time on them gain less. Most programs fall between the first and t
 </tr>
 </table>
 
+## Reporting bugs
+
+Open an issue here only if the problem happens on the standard 69 MHz build and stock ao486
+handles the same program correctly (same BIOS, disk image and settings). If stock ao486 fails
+too, it's an ao486 issue: report it to [ao486_MiSTer](https://github.com/MiSTer-devel/ao486_MiSTer/issues).
+
 ## Source
 
 - `rtl/tetrium`: the CPU, a subtree of the [Tetrium](https://github.com/ZbuntowanyKamulec/Tetrium)
