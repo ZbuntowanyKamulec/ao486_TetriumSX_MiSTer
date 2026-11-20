@@ -39,7 +39,7 @@ much of their time on them gain less. Most programs fall between the first and t
 </tr>
 <tr>
 <td><img src="doc/benchmarks/pcpbench.png" width="360"><br>PC Player Benchmark, VGA: 16.3 FPS</td>
-<td><img src="doc/benchmarks/superscape.png" width="360"><br>Superscape VRP benchmark: 100.1 FPS</td>
+<td><img src="doc/benchmarks/3dbench.png" width="360"><br>3DBench 1.0c: 100.1 FPS</td>
 </tr>
 <tr>
 <td><img src="doc/benchmarks/duke3d.png" width="360"><br>Duke Nukem 3D: 28 FPS (top left)</td>
