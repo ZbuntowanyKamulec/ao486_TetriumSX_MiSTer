@@ -14,6 +14,8 @@ only, like an i486SX.
 
 ## Architecture
 
+![Tetrium block diagram](doc/architecture.svg)
+
 An in-order scalar pipeline: F, D1, D2, A1, A2, M, E, W. Most instructions are one
 micro-op, and one completes per cycle. The main design decisions:
 
