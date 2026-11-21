@@ -6,7 +6,8 @@ else (BIOS, VGA, sound, disks, OSD) is ao486's, and the ao486 README below still
 
 ## Installation
 
-- Copy `ao486_TetriumSX_<date>.rbf` from `releases` to `_Computer` on the SD card.
+- Copy `ao486_TetriumSX_<date>.rbf` (and/or the overclocked `ao486_TetriumSX_OC_<date>.rbf`)
+  from `releases` to `_Computer` on the SD card.
 - Copy [boot0.rom](releases/boot0.rom) to `games/ao486`. The BIOS must be from 2026-11-20 or
   newer: with an older one, programs that use the BIOS wait function hang (e.g. Windows 98 at
   the code page screen). Stock ao486 works with the new BIOS too.
@@ -18,6 +19,15 @@ settings, so stock ao486's settings are not affected.
 
 - CPU Clock (main menu): 69, 35, 17 or 8.7 MHz
 - L2 Cache (Hardware): On / Off
+
+For games that need a slower PC than 8.7 MHz, or L1 cache off, use stock ao486 (same files).
+
+## Overclocked build
+
+`ao486_TetriumSX_OC` runs the CPU at 82 MHz instead of 69 MHz (CPU Clock: 82, 41, 20 or 10 MHz).
+Performance scales with the clock, so it is about 18% faster than the 69 MHz build. It does not
+meet Quartus timing at 82 MHz, so it may be unstable on some boards; it passed a 3-hour hwstress
+run on one. If something crashes, try the 69 MHz build before reporting it.
 
 ## Performance
 
@@ -61,6 +71,8 @@ too, it's an ao486 issue: report it to [ao486_MiSTer](https://github.com/MiSTer-
 - `rtl/tetrium_ao486.sv`: connects the CPU to the ao486 system; `rtl/cache/l2_cache.v` has a
   64-bit CPU port.
 - `sim/tetrium`: Verilator simulation of the whole system.
+- The OC build differs only in the PLL output (`rtl/pll/pll_0002.v`: c0 hi/lo 6/5, 81.82 MHz)
+  and the clock tables and CPU Clock names in `ao486.sv` (81818181, `'h20605`).
 
 Build with Quartus 17.0, see "Building core" below.
 
