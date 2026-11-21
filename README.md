@@ -1,7 +1,7 @@
 # ao486 TetriumSX for MiSTer
 
 ao486 with its CPU replaced by [Tetrium](https://github.com/ZbuntowanyKamulec/Tetrium): about
-2-3x as fast as stock ao486 in most programs. Integer only (no FPU), like a 486SX. Everything
+1.8-3x as fast as regular ao486 in most programs. Integer only (no FPU), like a 486SX. Everything
 else (BIOS, VGA, sound, disks, OSD) is ao486's, and the ao486 README below still applies.
 
 ## Installation
@@ -9,64 +9,61 @@ else (BIOS, VGA, sound, disks, OSD) is ao486's, and the ao486 README below still
 - Copy `ao486_TetriumSX_<date>.rbf` (and/or the overclocked `ao486_TetriumSX_OC_<date>.rbf`)
   from `releases` to `_Computer` on the SD card.
 - Copy [boot0.rom](releases/boot0.rom) to `games/ao486`. The BIOS must be from 2026-11-20 or
-  newer: with an older one, programs that use the BIOS wait function hang (e.g. Windows 98 at
-  the code page screen). Stock ao486 works with the new BIOS too.
+  newer: with an older one, programs that use the BIOS wait function hang (e.g. Windows 98 boot).
 
 The core uses ao486's folder and settings file, but keeps its own CPU Clock and L2 Cache
-settings, so stock ao486's settings are not affected.
+settings, so regular ao486's settings are not affected.
 
 ## Settings
 
 - CPU Clock (main menu): 69, 35, 17 or 8.7 MHz
 - L2 Cache (Hardware): On / Off
 
-For games that need a slower PC than 8.7 MHz, or L1 cache off, use stock ao486 (same files).
+For games that need a slower PC than 8.7 MHz, or L1 cache off, use regular ao486.
 
 ## Overclocked build
 
 `ao486_TetriumSX_OC` runs the CPU at 82 MHz instead of 69 MHz (CPU Clock: 82, 41, 20 or 10 MHz).
-Performance scales with the clock, so it is about 18% faster than the 69 MHz build. It does not
-meet Quartus timing at 82 MHz, so it may be unstable on some boards; it passed a 3-hour hwstress
-run on one. If something crashes, try the 69 MHz build before reporting it.
+It is about 18% faster than the 69 MHz build. It does not meet Quartus timing at 82 MHz, so it
+may be unstable on some boards; it passed a 3-hour hwstress run on one. If something crashes or hangs, try the 69 MHz build before reporting it.
 
 ## Performance
 
-Stock ao486 (90 MHz) and TetriumSX (69 MHz) on the same MiSTer. Code that runs from the CPU's
-caches gains the most; memory, video and disk access are still ao486's, so programs that spend
-much of their time on them gain less. Most programs fall between the first and the last row.
+Regular ao486 (90 MHz) and TetriumSX (69 MHz) on the same MiSTer.
 
-| Program | ao486 | TetriumSX | |
+| Program | ao486 | TetriumSX | Perf gain |
 |---|---|---|---|
 | Duke Nukem 3D, 320×200, default settings | 16 FPS | 28 FPS | 1.75× |
 | Doom 1.9, `-timedemo demo3`, high detail, full screen | 20.92 FPS | 37.49 FPS | 1.8× |
+| 3DBench 1.0c | 43.6 FPS | 100.1 FPS | 2.3× |
 | CPU-Z 1.04 Vintage Edition, Windows 98 SE | ~34 | ~101 | 3× |
 | System Information (Norton Utilities), CPU speed index | 69 | 299 | 4.3× |
 
 <table>
 <tr>
 <td><img src="doc/benchmarks/doom.png" width="360"><br>Doom 1.9, demo3: 37.49 FPS</td>
-<td><img src="doc/benchmarks/sysinfo.png" width="360"><br>System Information: 299 (it estimates the clock from a timing loop, hence "82 MHz")</td>
+<td><img src="doc/benchmarks/sysinfo.png" width="360"><br>System Information: 299 (69 MHz build; it estimates the clock from a timing loop, hence "82 MHz")</td>
 </tr>
 <tr>
 <td><img src="doc/benchmarks/pcpbench.png" width="360"><br>PC Player Benchmark, VGA: 16.3 FPS</td>
 <td><img src="doc/benchmarks/3dbench.png" width="360"><br>3DBench 1.0c: 100.1 FPS</td>
 </tr>
 <tr>
-<td><img src="doc/benchmarks/duke3d.png" width="360"><br>Duke Nukem 3D: 28 FPS (top left)</td>
+<td><img src="doc/benchmarks/duke3d.png" width="360"><br>Duke Nukem 3D: ~28 FPS</td>
 <td></td>
 </tr>
 </table>
 
 ## Reporting bugs
 
-Open an issue here only if the problem happens on the standard 69 MHz build and stock ao486
-handles the same program correctly (same BIOS, disk image and settings). If stock ao486 fails
+Open an issue here only if the problem happens on the standard 69 MHz build and regular ao486
+handles the same program correctly (same BIOS, disk image and settings). If regular ao486 fails
 too, it's an ao486 issue: report it to [ao486_MiSTer](https://github.com/MiSTer-devel/ao486_MiSTer/issues).
 
 ## Source
 
 - `rtl/tetrium`: the CPU, a subtree of the [Tetrium](https://github.com/ZbuntowanyKamulec/Tetrium)
-  repository. CPU changes go there, then:
+  repository. CPU fixes are made there and pulled in with
   `git subtree pull --prefix=rtl/tetrium https://github.com/ZbuntowanyKamulec/Tetrium main --squash`
 - `rtl/tetrium_ao486.sv`: connects the CPU to the ao486 system; `rtl/cache/l2_cache.v` has a
   64-bit CPU port.
@@ -75,6 +72,21 @@ too, it's an ao486 issue: report it to [ao486_MiSTer](https://github.com/MiSTer-
   and the clock tables and CPU Clock names in `ao486.sv` (81818181, `'h20605`).
 
 Build with Quartus 17.0, see "Building core" below.
+
+## FPGA resources
+
+69 MHz build (DE10-Nano, Cyclone V 5CSEBA6, Quartus 17.0, seed 1). All clocks meet timing; worst
+setup slack +0.350 ns on the 69 MHz system clock.
+
+| | Whole core | Tetrium CPU |
+|---|---|---|
+| Logic (ALMs) | 37,068 / 41,910 (88%) | 18,544 |
+| Registers | 37,894 | 13,234 |
+| RAM blocks (M10K) | 553 / 553 (100%) | 135 |
+| DSP blocks | 41 / 112 (37%) | 3 |
+
+The CPU column includes its caches, TLBs, microcode ROM and the bus bridge; the L2 cache (675
+ALMs, 32 M10K) is part of the system.
 
 ## Credits and license
 
@@ -91,7 +103,7 @@ MiSTer port of the ao486 core originally written by Aleksander Osman, which has 
 Original Core [repository](https://github.com/alfikpl/ao486)
 
 ## Features:
-* TetriumSX CPU at 69 MHz, about 2-3x the speed of ao486's CPU (no FPU).
+* TetriumSX CPU at 69 MHz, about 1.8-3x the speed of ao486's CPU (no FPU).
 * 256MB RAM
 * SVGA with up to 1280x1024@256, 1024x768@64K, 640x480@16M resolutions
 * Sound Blaster 16 (DSP v4.05) and Sound Blaster Pro (DSP v3.02) with OPL3 and C/MS
@@ -105,7 +117,7 @@ Original Core [repository](https://github.com/alfikpl/ao486)
 ## How to install
 
 * Copy the .rbf to the _Computer folder on your SD card (see Installation at the top).
-* Create games/ao486/ directory on SD card and copy [boot0.rom](https://github.com/MiSTer-devel/ao486_MiSTer/blob/master/releases/boot0.rom), [boot1.rom](https://github.com/MiSTer-devel/ao486_MiSTer/blob/master/releases/boot1.rom) there.
+* Create games/ao486/ directory on SD card and copy [boot0.rom](releases/boot0.rom), [boot1.rom](releases/boot1.rom) there.
 * For CD images, the typical location is games/ao486/cd/ and you can either have the game folders, or CHD, IMG, ISO, BIN/CUE files in the root for mounting.  The imgset command can be used in DOS to mount/unmount images placed here by passing the exact path.
 * For floppy: copy desired floppy raw image with extension **img** to games/ao486/floppy/ directory.  The imgset command can be used in DOS to mount/unmount images placed here by passing the exact path.
 * For HDD: create an empty file of desired size with extension **vhd** in ao486 directory (or prepare .vhd file separately with any tool supporting .vhd or hard disk .img files and copy to games/ao486/ folder)
@@ -132,7 +144,7 @@ Optional programs and drivers:  https://github.com/MiSTer-devel/ao486_MiSTer/tre
 * modem9x.inf: Used for Windows modem setup.
 * mpuctl.exe: tool for sending commands to the optional mt32-pi baremetal synth.  See reference below.
 * sbctl.exe: set Sound Blaster configs.  Supported: I5,I7,I10,H5,H1,T4,T6
-* sysctl.exe: Used for setting core options and cache referenced above from command line. Usase: SYSCTL SYS/MENU 90Mhz/56Mhz/15Mhz L1+/L1- L2+/L2-  (with TetriumSX: 90/56/30/15 select a CPU clock of 69/35/17/8.7 MHz; L1 has no effect)
+* sysctl.exe: Used for setting core options and cache referenced above from command line. Usage: SYSCTL SYS/MENU 90Mhz/56Mhz/30Mhz/15Mhz L1+/L1- L2+/L2-  (with TetriumSX: 90/56/30/15 select a CPU clock of 69/35/17/8.7 MHz; L1 has no effect)
 
 ### Gravis UltraSound
 Default config: baseport=240, IRQ1=7, IRQ2=7, DMA1=7, DMA2=7. (SET ULTRASND=240,7,7,7,7)
@@ -197,8 +209,8 @@ It doesn't prevent windows from working but you need to keep in mind some specif
 * Build project
     * After cloning this repo and changing to the directory:
 
-            docker run -it --rm -v $(pwd):/build raetro/quartus:mister quartus_sh --flow compile ao486.qpf
+            docker run -it --rm -v $(pwd):/build ghcr.io/raetro/quartus:mister quartus_sh --flow compile ao486.qpf
 
 * Access GUI
 
-        docker run --rm -ti --net=host --ipc=host -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix --env="QT_X11_NO_MITSHM=1" -v $(pwd):/build raetro/quartus:mister quartus
+        docker run --rm -ti --net=host --ipc=host -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix --env="QT_X11_NO_MITSHM=1" -v $(pwd):/build ghcr.io/raetro/quartus:mister quartus
