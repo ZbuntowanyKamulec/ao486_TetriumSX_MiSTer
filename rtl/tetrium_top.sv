@@ -19,8 +19,7 @@ module tetrium_top #(
     // a system whose BIOS never clears CD / NW (e.g. the Bochs BIOS) resets with 0000_0010
     parameter logic [31:0] RESET_CR0    = 32'h6000_0010,
     parameter logic [31:0] CPU_SIG      = `CPU_SIG,
-    parameter bit          HAS_CPUID    = `HAS_CPUID,
-    parameter bit          DEBUG_REGS   = `DEBUG_REGS
+    parameter bit          HAS_CPUID    = `HAS_CPUID
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -58,21 +57,15 @@ module tetrium_top #(
     init_seg[4] = 16'h0000;
     init_seg[5] = 16'h0000;
   end
-  logic        retire, idle;
-  logic [255:0] dbg_gpr;
-  logic [95:0] dbg_seg;
-  logic [31:0] dbg_flags;
-  logic [31:0] dbg_ip;
-  logic [31:0] dbg_perf;
 
   tetrium_core #(.CACHEABLE(CACHEABLE), .WCOMB(WCOMB), .MT_N(MT_N), .MT_BASE(MT_BASE), .MT_MASK(MT_MASK), .MT_TYPE(MT_TYPE), .BUS_DW(BUS_DW),
-                .CPU_SIG(CPU_SIG), .HAS_CPUID(HAS_CPUID), .DEBUG_REGS(DEBUG_REGS)) u_core (
+                .CPU_SIG(CPU_SIG), .HAS_CPUID(HAS_CPUID)) u_core (
       .clk, .rst,
       .init_gpr, .init_seg, .init_csbase(RESET_CSBASE), .init_cr0(RESET_CR0), .init_ip(32'h0000_FFF0), .init_flags(16'h0002),
       .wb_cyc, .wb_stb, .wb_we, .wb_adr, .wb_sel, .wb_dato, .wb_tga, .wb_lock, .wb_dati, .wb_ack, .wb_stall,
       .intr, .nmi, .sstep(1'b0), .stop_req(1'b0), .a20m, .snoop_v, .snoop_line, .flush, .cflush, .cwback,
-      .halted, .shutdown, .retire, .idle, .dbg_gpr, .dbg_seg, .dbg_ip, .dbg_flags, .dbg_perf,
+      .halted, .shutdown, .retire(), .idle(), .dbg_gpr(), .dbg_seg(), .dbg_ip(), .dbg_flags(), .dbg_perf(),
       .dbg_sbase(), .dbg_slim(), .dbg_sattr(), .dbg_cr0(), .dbg_cpl(), .dbg_sys(),
-      .dbg_ret_inj(), .dbg_ret_dbt(), .dbg_dr6(), .dbg_dr7(), .dbg_st_v(), .dbg_st_sz(), .dbg_st_lin(), .dbg_st_lin4(), .dbg_st_data(),
+      .dbg_ret_inj(), .dbg_ret_dbt(), .dbg_nmi_ack(), .dbg_dr6(), .dbg_dr7(), .dbg_st_v(), .dbg_st_sz(), .dbg_st_lin(), .dbg_st_lin4(), .dbg_st_data(),
       .dbg_pw_v(), .dbg_pw_adr(), .dbg_pw_dat());
 endmodule

@@ -16,10 +16,10 @@ index for the first uop of an instruction:
     normal opcode : {page (0F xx), opcode[7:0], mod3}                    (0..1023)
     group opcode  : 1024 + group*16 + reg*2 + mod3                       (1024..1135)
                     groups: F6 F7 FE FF 0F00 0F01 0FBA
-    + 2048 in protected mode (CR0.PE and not VM; decode adds the bit): an
-    instruction without a protected-mode sequence gets a copy of its real-mode
-    first uop there (same successors)
-Continuation uops live at 1136..2047 and 3184.. .  Undefined entries raise #UD.
+In protected mode (CR0.PE and not VM) an instruction with a sequence of its own starts
+there instead (decoder table pm_ent, by dispatch index); so do the I/O instructions that
+check the permission bitmap (io_ent).  Continuation uops and those sequences live at
+1136..2047.  Undefined entries raise #UD.
 
 The A stage (address generation) cannot use ROM outputs directly (BRAM clock
 to out is too slow), so every uop word carries the A-stage fields of its
@@ -42,12 +42,13 @@ UW_BITS = 88
 AMODE = ['NONE', 'EA', 'EA2', 'POP', 'POPN', 'SI', 'DI', 'VEC', 'VEC2', 'EAC', 'TA', 'TAS',
          'DSCR', 'DSCI', 'DSCT', 'IDT', 'TSS', 'LIN', 'TSSA']
 #  EA   : modrm / moffs / xlat effective address, segment default/override
-#  EA2  : same + operand size (the selector of a far pointer)
+#  EA2  : same + operand size (the selector of a far pointer; 0F 01: + 2); never the first
+#         uop of a sequence (its displacement is registered from the instruction's fields)
 #  POP  : SS:SP, SP += operand size
 #  POPN : SS:SP, SP += operand size + imm16   (RET n)
 #  SI   : seg(DS/ovr):SI, SI += +-size
 #  DI   : ES:DI, DI += +-size             (primary/load)
-#  VEC  : 0:imm8*4     VEC2: 0:imm8*4+2
+#  VEC  : IDTR base + imm8*4     VEC2: IDTR base + imm8*4 + 2   (real-mode vectors)
 #  EAC  : EA computed but no memory access (LEA)
 #  TA   : offset = T0 (computed by an earlier uop), segment as for EA
 #  TAS  : offset = T0, segment SS, stack address size
@@ -58,7 +59,7 @@ AMODE = ['NONE', 'EA', 'EA2', 'POP', 'POPN', 'SI', 'DI', 'VEC', 'VEC2', 'EAC', '
 #  IDT  : IDTR base + vector * 8 + aoff     TSS : TR base + T0 + aoff     LIN : T0 + aoff
 #  TSSA : TR base + aoff (unscaled)
 SEC = ['NONE', 'PUSH', 'STDI', 'DSCA']
-#  PUSH : secondary (store) address SS:SP-2, SP -= 2
+#  PUSH : secondary (store) address SS:(E)SP - size, (E)SP -= size
 #  STDI : secondary (store) address ES:DI,  DI += +-size
 #  DSCA : the access byte of the descriptor (DSC* modes): table base + (selector & FFF8) + 5
 ABR = ['NONE', 'JMPD', 'LOOP', 'LOOPZ', 'LOOPNZ', 'JCXZ', 'BRE', 'BRI']
@@ -79,13 +80,15 @@ EOP = ['NOP', 'ALUOP', 'ALUREG', 'ADD', 'SUB', 'TEST', 'INC', 'DEC', 'NOT', 'NEG
        'GATE', 'TSSOFF', 'LDSP', 'OLDSP', 'PADDR', 'SEGVAL', 'IOMAP', 'IOBIT', 'LARV', 'ARPL',
        'IRVM', 'LDV86', 'SEGNUL',
        'IRNT', 'TSSDESC', 'TFLG', 'TLNK', 'LDTSK', 'LDCR3', 'TLFL', 'TLDW',
-       'INVLPG', 'TRD', 'TWR', 'PROBE', 'CPUID', 'CINV', 'TBIT']
+       'INVLPG', 'TRD', 'TWR', 'PROBE', 'CPUID', 'CINV', 'TBIT', 'RPROBE']
 #  CINV  : INVD / WBINVD: store buffer drained, both caches invalidated (tag sweep), refetch
 #  CPUID : R = register rfix (0 EAX, 1 ECX, 2 EDX, 3 EBX) of CPUID leaf A (#UD without CPUID)
 #  paging: INVLPG: drop the TLB entry of the operand's linear address (serializing);
 #  TRD / TWR: MOV r32, TRn / MOV TRn, r32 (TR6 / TR7: TLB test, TR3-5: registers; #UD below TR3)
 #  PROBE: a store uop that stores nothing: its address is checked for a write (limit, rights,
 #         paging: #SS / #GP / #PF) and translated with write intent
+#  RPROBE: a load uop that loads nothing: its address is limit / rights checked for a read
+#         (#SS / #GP), not translated, not read, no #AC
 #  task switch (see TSW below): IRNT: IRET with NT micro-jumps to the task return;
 #  TSSDESC: R = the new TSS's base (T1 / T3), #TS if its limit is too small; TFLG: R = the
 #  EFLAGS image to save (NT cleared for IRET); TLNK: the back-link store (CALL / INT only);
@@ -94,7 +97,7 @@ EOP = ['NOP', 'ALUOP', 'ALUREG', 'ADD', 'SUB', 'TEST', 'INC', 'DEC', 'NOT', 'NEG
 #  LDCR3: CR3 <- B;  TLFL: EFLAGS <- B (all bits, VM; NT for CALL / INT);  TLDW: R = B | FFFF0000
 #  IRVM  : R = B (the popped EFLAGS); IRETD at CPL 0 with VM set micro-jumps to the V86 return
 #  LDV86 : V86 return: CS = T0 (real-mode style), EIP = T2[15:0], EFLAGS = B (VM), CPL 3
-#  SEGNUL: segment register rfix = null (interrupt from V86)
+#  SEGNUL: segment register rfix = null (interrupt from V86, FS / GS of a 286 TSS)
 #  IOMAP : R = I/O map base (B) + port (A) / 8; #GP(0) for a 286 TSS at CPL > IOPL
 #  IOBIT : #GP(0) if a bit of the port (A, size of the instruction) is set in the map
 #          word B (map offset T0) or the bits lie beyond the TSS limit
@@ -180,7 +183,7 @@ CK = ['NONE', 'SEG', 'CSJ', 'CSC', 'CSR', 'LDT', 'TSS', 'CSI', 'INTG', 'INTCS', 
 CHK = ['NONE', 'CPL0', 'IOPL', 'V86IOPL']
 #  CPL0 : #GP(0) unless CPL 0 (protected mode) / always in V86
 #  IOPL : #GP(0) if CPL > IOPL (protected mode; V86: IOPL < 3)       CLI, STI
-#  V86IOPL : #GP(0) in V86 with IOPL < 3                    PUSHF, POPF, INT, IRET
+#  V86IOPL : #GP(0) in V86 with IOPL < 3                    PUSHF, POPF, INT n, IRET
 
 # --------------------------------------------------------------- layout
 FIELDS = [  # name, width   (LSB first)
@@ -346,7 +349,11 @@ define(0x61, lambda: [U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='FIX', rfix=7, s
                       U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='FIX', rfix=1, sz='Z'),
                       U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='FIX', rfix=0, sz='Z')])
 # BOUND r, m: #BR unless m[0] <= r <= m[1] (signed)
-define(0x62, lambda: [U(a='EA', mrd=1, e='BOUND', sa='REG', sb='MEM', sz='Z'),
+# (both bounds are limit-checked before either is read: the upper one by a probe first;
+#  EA2 is not valid in an instruction's first uop, hence the NOP)
+define(0x62, lambda: [U(e='NOP'),
+                      U(a='EA2', mrd=1, e='RPROBE', sz='Z'),
+                      U(a='EA', mrd=1, e='BOUND', sa='REG', sb='MEM', sz='Z'),
                       U(a='EA2', mrd=1, e='BOUND', sa='MEM', sb='REG', sz='Z')], UD)
 for op in (0x69, 0x6B):                # IMUL r, r/m, imm
     define(op, lambda: [U(a='EA', mrd=1, e='IMUL2', sa='MEM', sb='IMM', d1='REG', sz='Z')],
@@ -445,9 +452,9 @@ define(0xCA, lambda: [U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T0', sz='Z'),
                       U(a='POPN', mrd=1, abr='BRI', e='JFAR', sa='MEM', sb='T0', sz='Z')])
 define(0xCB, lambda: [U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T0', sz='Z'),
                       U(a='POP', mrd=1, abr='BRI', e='JFAR', sa='MEM', sb='T0', sz='Z')])
-define(0xCC, lambda: [U(e='INT', sz='W16', chk='V86IOPL')])
+define(0xCC, lambda: [U(e='INT', sz='W16')])                      # INT3, INTO: not IOPL-sensitive in V86
 define(0xCD, lambda: [U(e='INT', sz='W16', chk='V86IOPL')])
-define(0xCE, lambda: [U(e='INTO', sz='W16', chk='V86IOPL')])
+define(0xCE, lambda: [U(e='INTO', sz='W16')])
 define(0xCF, lambda: [U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T0', sz='Z', chk='V86IOPL'),
                       U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T1', sz='Z'),
                       U(a='POP', mrd=1, e='IRET', sb='MEM', sz='Z')])
@@ -510,11 +517,15 @@ define(0xFF, lambda: [U(a='EA', mrd=1, sec='PUSH', e='PASSB', sb='MEM', sz='Z', 
 # system registers (real mode: CPL 0).  SGDT / SIDT / LGDT / LIDT: limit at EA, base at
 # EA + 2 (T0 = EA); LGDT / LIDT with a 16-bit operand size load a 24-bit base.
 def sdt_store(lim, base):
-    # (EA2 of the 0F 01 group: EA + 2 at either operand size)
-    return lambda: [U(a='EA', e='SRD', rfix=lim, sz='W16', wr='PRI'),
+    # (EA2 of the 0F 01 group: EA + 2 at either operand size; all 6 bytes are limit-checked
+    #  before the first store: the base part by a probe, see BOUND)
+    return lambda: [U(e='NOP'),
+                    U(a='EA2', mrd=1, e='RPROBE', sz='D32'),
+                    U(a='EA', e='SRD', rfix=lim, sz='W16', wr='PRI'),
                     U(a='EA2', e='SRD', rfix=base, sz='D32', wr='PRI')]
 def sdt_load(r):
     return lambda: [U(a='EAC', e='LEA', d1='T0', sz='Z', chk='CPL0'),
+                    U(a='EA2', mrd=1, e='RPROBE', sz='D32'),     # (the base part: limit first)
                     U(a='TA', mrd=1, e='PASSB', sb='MEM', d1='T1', sz='W16'),
                     U(e='ADDNF', sa='T0', sb='OPSZ', d1='T0', sz='W16'),
                     U(a='TA', mrd=1, e='SWR', rfix=r, sb='MEM', sz='D32')]
@@ -667,7 +678,8 @@ define(0xCF, lambda: far_cs([U(e='IRNT', sz='Z'),
        [U(e='LDCS', ck='CSI', sb='T4', sz='Z')], mode='pm')
 
 # LAR / LSL (0F 02 / 03), VERR / VERW (0F 00 /4 /5): the selector to T0, the descriptor
-# (LSL: low dword to T1) is read without faulting, ZF tells
+# (LSL: low dword to T1) is read without faulting, ZF tells; the NOP keeps the next instruction's
+# bypass off the result of an invalid one (not written)
 def lar(ck, rd):
     def mk(m):
         first = [U(a='EA', mrd=1, m16=1, e='PASSB', sb='MEM', d1='T0', sz='W16')] if m else []
@@ -675,7 +687,7 @@ def lar(ck, rd):
         sel = 'T0' if m else 'RM'
         lo = [U(a=a, aoff=0, mrd=1, e='DLO', ck='ACC', sa=sel, sb='MEM', d1='T1', sz='D32')] if ck == 'LSL' else []
         return first + lo + [U(a=a, aoff=4, mrd=1, e='LARV', ck=ck, sa=sel, sb='MEM', d1=('REG' if rd else 'NONE'),
-                               sz=('Z' if rd else 'W16'))]
+                               sz=('Z' if rd else 'W16'))] + ([U(e='NOP')] if rd else [])
     return (lambda: mk(True)), (lambda: mk(False))
 for op, ck in ((0x02, 'LAR'), (0x03, 'LSL')):
     m_, r_ = lar(ck, True)
@@ -883,7 +895,8 @@ INJ = [('INT_RM', INT_SEQ), ('INT_PM', INT_PM), ('INTF', INT_FRAME), ('CALLG', C
        ('TASKG', TASKG), ('TASKI', TASKI), ('IRETT', IRETT), ('TSWS32', tsw_save(True)), ('TSWS16', tsw_save(False)),
        ('TSWL32', tsw_load(True)), ('TSWL16', tsw_load(False)), ('TSWV86', tsw_load(True, True))]
 
-# REP-exhausted retire marker: A turns a killed rep iteration into this.
+# (the REP-exhausted retire marker needs no ROM entry: A turns a killed REP iteration
+# into a RETIRE uop)
 
 # everything not defined raises #UD
 for pg in (0, 1):
@@ -904,7 +917,7 @@ next_free = CONT_BASE
 
 
 def alloc(n=1):
-    """n consecutive continuation addresses (outside both dispatch areas)"""
+    """n consecutive continuation addresses (after the dispatch area)"""
     global next_free
     a = next_free
     next_free += n

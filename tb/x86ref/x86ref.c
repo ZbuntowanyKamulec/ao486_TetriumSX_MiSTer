@@ -328,6 +328,130 @@ lin2phys(uint32_t lin)
     return (p == 0xffffffffffffffffULL) ? lin : (uint32_t) p;
 }
 
+/* ---- page-end look-ahead (see X86REF_CLIPPED in 386_common.h) */
+int x86ref_clip_on = 0;
+static uint32_t clip_ins = 0xFFFFFFFFu, clip_pe = 0;
+static uint32_t clip_for(uint32_t lin);
+/* a code read at linear a: beyond the end of the page of the instruction now running, which
+   ends before it */
+int
+x86ref_clipped(uint32_t a)
+{
+    uint32_t ins = cs + cpu_state.oldpc;
+    if (ins != clip_ins) {
+        clip_ins = ins;
+        clip_pe  = clip_for(ins);
+    }
+    return clip_pe && (a >= clip_pe);
+}
+
+/* length of the instruction in b[0..n-1] (d32: 32-bit code segment), -1 if it needs a
+   byte beyond n; an undefined 0F opcode ends at its opcode byte (#UD from those bytes) */
+static int
+insn_len(const uint8_t *b, int n, int d32)
+{
+    int i = 0, os = d32, as = d32, op, m, mod, rm, imm = 0, mr = 0;
+#define NEED(k) do { if ((k) >= n) return -1; } while (0)
+    for (;; i++) {
+        NEED(i);
+        op = b[i];
+        if (op == 0x66) os ^= 1;
+        else if (op == 0x67) as ^= 1;
+        else if (op == 0xF0 || op == 0xF2 || op == 0xF3 || op == 0x26 || op == 0x2E || op == 0x36 || op == 0x3E ||
+                 op == 0x64 || op == 0x65) ;
+        else break;
+        if (i >= 14) return -1;
+    }
+    i++;
+    const int z = os ? 4 : 2;
+    if (op == 0x0F) {
+        NEED(i);
+        op = b[i++];
+        if (op <= 0x03 || (op >= 0x20 && op <= 0x23) || op == 0x24 || op == 0x26 || (op >= 0x90 && op <= 0x9F) ||
+            op == 0xA3 || op == 0xA5 || op == 0xAB || op == 0xAD || op == 0xAF || (op >= 0xB0 && op <= 0xB7) ||
+            (op >= 0xBB && op <= 0xC1)) mr = 1;
+        else if (op == 0xA4 || op == 0xAC || op == 0xBA) { mr = 1; imm = 1; }
+        else if (op >= 0x80 && op <= 0x8F) imm = z;
+        else if (op == 0x06 || op == 0x08 || op == 0x09 || (op >= 0xA0 && op <= 0xA2) || (op >= 0xA8 && op <= 0xAA) ||
+                 (op >= 0xC8 && op <= 0xCF)) ;
+        else return i;
+    } else if (op < 0x40) {
+        if ((op & 7) < 4) mr = 1;
+        else if ((op & 7) == 4) imm = 1;
+        else if ((op & 7) == 5) imm = z;
+    } else if (op < 0x62) ;
+    else if (op == 0x62 || op == 0x63 || (op >= 0x84 && op <= 0x8F) || op == 0xC4 || op == 0xC5 ||
+             (op >= 0xD0 && op <= 0xD3) || (op >= 0xD8 && op <= 0xDF) || op == 0xFE || op == 0xFF) mr = 1;
+    else if (op == 0x68 || op == 0xA9 || (op >= 0xB8 && op <= 0xBF) || op == 0xE8 || op == 0xE9) imm = z;
+    else if (op == 0x69 || op == 0x81 || op == 0xC7) { mr = 1; imm = z; }
+    else if (op == 0x6A || (op >= 0x70 && op <= 0x7F) || op == 0xA8 || (op >= 0xB0 && op <= 0xB7) || op == 0xCD ||
+             op == 0xD4 || op == 0xD5 || (op >= 0xE0 && op <= 0xE7) || op == 0xEB) imm = 1;
+    else if (op == 0x6B || op == 0x80 || op == 0x82 || op == 0x83 || op == 0xC0 || op == 0xC1 || op == 0xC6) { mr = 1; imm = 1; }
+    else if (op == 0x9A || op == 0xEA) imm = z + 2;
+    else if (op >= 0xA0 && op <= 0xA3) imm = as ? 4 : 2;
+    else if (op == 0xC2 || op == 0xCA) imm = 2;
+    else if (op == 0xC8) imm = 3;
+    else if (op == 0xF6 || op == 0xF7) mr = 2;
+    if (mr) {
+        NEED(i);
+        m = b[i++];
+        mod = m >> 6; rm = m & 7;
+        if (mr == 2 && ((m >> 3) & 7) < 2) imm = (op == 0xF6) ? 1 : z;
+        if (mod != 3) {
+            if (as) {
+                if (rm == 4) { NEED(i); if (mod == 0 && (b[i] & 7) == 5) i += 4; i++; }
+                else if (mod == 0 && rm == 5) i += 4;
+                i += (mod == 1) ? 1 : (mod == 2) ? 4 : 0;
+            } else {
+                if (mod == 0 && rm == 6) i += 2;
+                i += (mod == 1) ? 1 : (mod == 2) ? 2 : 0;
+            }
+        }
+    }
+    i += imm;
+    NEED(i - 1);
+    return i;
+#undef NEED
+}
+
+/* the instruction at linear address lin ends in its page: clip the code fetch there */
+static uint32_t
+clip_for(uint32_t lin)
+{
+    uint8_t  b[16];
+    uint32_t pe = (lin | 0xFFF) + 1;
+    int      n  = (int) (pe - lin);
+    if (!(cr0 >> 31) || n >= 15)
+        return 0;
+    for (int k = 0; k < n; k++)
+        b[k] = ram[lin2phys(lin + k) & rammask & (mem_size * 1024u - 1)];
+    return (insn_len(b, n, !!use32) > 0) ? pe : 0;
+}
+
+/* an instruction that continues into the next page: a 486 fetches all of it before it runs,
+   so the next page is translated first (its accessed bit set, or its #PF taken before any
+   fault of the instruction itself: 86Box fetches immediates late, after the operand checks) */
+static int
+fetch_cross(uint32_t lin)
+{
+    uint8_t  b[16];
+    uint32_t pe = (lin | 0xFFF) + 1;
+    int      n  = (int) (pe - lin);
+    if (!(cr0 >> 31) || n >= 15)
+        return 0;
+    for (int k = 0; k < 16; k++)
+        b[k] = ram[lin2phys(lin + k) & rammask & (mem_size * 1024u - 1)];
+    if (insn_len(b, n, !!use32) > 0 || insn_len(b, 16, !!use32) <= n)
+        return 0;
+    /* (its own page first: its accessed bit, or its #PF as 86Box would take it) */
+    (void) mmutranslatereal(lin, 0);
+    if (cpu_state.abrt)
+        return 1;
+    (void) mmutranslatereal(pe, 0);
+    /* (not accessible: the #PF of the fetch, before the instruction runs) */
+    return !!cpu_state.abrt;
+}
+
 /* does the instruction at CS:pc carry a REP prefix? */
 static int
 has_rep(uint32_t lin)
@@ -438,6 +562,68 @@ xfer_fault(int w0)
     }
 }
 
+/* the instruction's last byte lies beyond the CS limit: a 486 raises #GP(0) before it runs
+   (86Box checks the limit on control transfers only) */
+static int
+cs_past_limit(uint32_t pc0)
+{
+    uint32_t lim = cpu_state.seg_cs.limit_high;
+    uint8_t  b[16];
+    int      len;
+    if (pc0 > lim)
+        return 1;
+    if (lim - pc0 >= 15)
+        return 0;
+    for (int k = 0; k < 16; k++)
+        b[k] = ram[lin2phys(cs + pc0 + k) & rammask & (mem_size * 1024u - 1)];
+    len = insn_len(b, 16, !!use32);
+    return (len > 0) && (pc0 + (uint32_t) len - 1 > lim);
+}
+
+/* shutdown held (the testbench's NMI runs): a step that ends in 86Box's reset (a triple
+   fault) restores the state from before the instruction instead (RF set), as the core waits
+   in shutdown with it (the stores of the delivery attempts stay); an NMI then leaves it */
+static int hold_shut = 0;
+static struct {
+    cpu_state_t st;
+    uint32_t    cr2, cr3, cr4, dr[8], use32;
+    x86seg      gdt, ldt, idt, tr;
+    int         stack32, oldcpl, nmi_enable;
+    uint16_t    cur_status;
+} hs;
+void
+ref_hold_shutdown(int on)
+{
+    hold_shut = on;
+}
+static void
+hs_take(void)
+{
+    flags_rebuild();
+    hs.st = cpu_state;
+    hs.cr2 = cr2; hs.cr3 = cr3; hs.cr4 = cr4;
+    memcpy(hs.dr, dr, sizeof hs.dr);
+    hs.use32 = use32; hs.stack32 = stack32; hs.oldcpl = oldcpl; hs.nmi_enable = nmi_enable;
+    hs.gdt = gdt; hs.ldt = ldt; hs.idt = idt; hs.tr = tr;
+    hs.cur_status = cpu_cur_status;
+}
+static void
+hs_restore(void)
+{
+    cpu_state = hs.st;
+    cr2 = hs.cr2; cr3 = hs.cr3; cr4 = hs.cr4;
+    memcpy(dr, hs.dr, sizeof hs.dr);
+    use32 = hs.use32; stack32 = hs.stack32; oldcpl = hs.oldcpl; nmi_enable = hs.nmi_enable;
+    gdt = hs.gdt; ldt = hs.ldt; idt = hs.idt; tr = hs.tr;
+    cpu_cur_status = hs.cur_status;
+    cpu_halted = 0;
+    /* (RF set, as the fault deliveries left it: the saved EIP points at the instruction, as
+       in a fault's frame; what a 486 holds in shutdown is not documented) */
+    cpu_state.eflags |= RF_FLAG;
+    flags_extract();
+    flushmmucache();
+}
+
 int
 ref_step(void)
 {
@@ -453,13 +639,43 @@ ref_step(void)
     int      xfer = is_xfer(ph0);
     int      w0   = wlog_n;
 
-    if (xfer)
-        snap_take();
     x86_was_reset = 0;
-    run_one();
-    /* (a delivered fault leaves EIP at its handler, inside the limit) */
-    if (xfer && !x86_was_reset && (cpu_state.pc > cpu_state.seg_cs.limit_high))
-        xfer_fault(w0);
+    if (hold_shut)
+        hs_take();
+    if (cs_past_limit(pc0)) {
+        snap_take();
+        xfer_fault(w0);             /* (nothing to undo: #GP(0) at the instruction) */
+        rep = 0;
+    } else {
+        if (xfer)
+            snap_take();
+        clip_ins       = 0xFFFFFFFFu;
+        x86ref_clip_on = 1;
+        if (!clip_for(cs + pc0) && fetch_cross(cs + pc0)) {
+            int a, second;
+            oldcs           = CS;
+            cpu_state.oldpc = cpu_state.pc;
+            a               = cpu_state.abrt & ABRT_MASK;
+            cpu_state.abrt  = 0;
+            x86_doabrt(a);
+            if (cpu_state.abrt) {
+                second         = cpu_state.abrt & ABRT_MASK;
+                cpu_state.abrt = 0;
+                cpu_state.pc   = cpu_state.oldpc;
+                x86_fault_in_delivery(a, second);
+                if (cpu_state.abrt) {
+                    cpu_state.abrt = 0;
+                    softresetx86();
+                    ref_apply_cfg();
+                }
+            }
+            rep = 0;
+        } else
+            run_one();
+        /* (a delivered fault leaves EIP at its handler, inside the limit) */
+        if (xfer && !x86_was_reset && (cpu_state.pc > cpu_state.seg_cs.limit_high))
+            xfer_fault(w0);
+    }
     if (rep && !trp) {
         /* a REP string instruction yields with pc at its start while the
            count is non-zero: run it to completion */
@@ -467,8 +683,11 @@ ref_step(void)
         while (cpu_state.pc == pc0 && CS == cs0 && !x86_was_reset && --guard)
             run_one();
     }
+    x86ref_clip_on = 0;
     if (x86_was_reset)
         r |= REF_STEP_RESET;
+    if (x86_was_reset && hold_shut)
+        hs_restore();
     if (hlt0 && cpu_state.pc == pc0 && CS == cs0)
         r |= REF_STEP_HALT;
     if (trp)
@@ -497,6 +716,8 @@ ref_step_rep_partial(uint32_t remaining)
             break;
     }
     cnt = a32 ? ECX : CX;
+    if (!a32)
+        remaining &= 0xFFFF;            /* (the testbench passes all of ECX) */
     if (remaining >= cnt)
         return 1;                       /* nothing done yet */
     done = cnt - remaining;
@@ -510,6 +731,7 @@ ref_step_rep_partial(uint32_t remaining)
     else
         CX = (uint16_t) remaining;
     cpu_state.pc = pc0;
+    cpu_rep_cont_lin = cs + pc0;
     return 1;
 }
 
@@ -523,6 +745,7 @@ ref_interrupt(int vector)
     flags_rebuild();
     oldcs           = CS;
     cpu_state.oldpc = cpu_state.pc;
+    cpu_rep_rf();
     if (msw & 1)
         pmodeint(vector, 0);
     else if ((vector << 2UL) + 3UL > idt.limit) {
@@ -553,12 +776,27 @@ ref_interrupt(int vector)
     cpu_debug_trap_after_delivery();
 }
 
-void
+int
 ref_nmi(void)
 {
-    flags_rebuild();
-    oldcs           = CS;
-    cpu_state.oldpc = cpu_state.pc;
-    x86_int(2);
-    cpu_debug_trap_after_delivery();
+    /* as exec386's NMI: out of a HLT past it, NMI blocked up to the next IRET; delivered
+       as an external interrupt (exec386 uses x86_int, the fault path: RF would be pushed) */
+    int ok = nmi_enable;
+    if (cpu_halted)
+        cpu_state.pc++;
+    cpu_halted = 0;
+    ref_interrupt(2);
+    nmi_enable = 0;
+    return ok;
+}
+
+/* linear -> physical without side effects (instruction bytes for the testbench) */
+extern uint64_t mmutranslate_noabrt(uint32_t addr, int rw);
+uint32_t
+ref_phys(uint32_t lin)
+{
+    if (!(cr0 >> 31))
+        return lin;
+    uint64_t a = mmutranslate_noabrt(lin, 0);
+    return (a > 0xffffffffULL) ? lin : (uint32_t) a;
 }

@@ -6,9 +6,11 @@
 //  * instruction length from the per-byte predecode stored in the I-cache
 //    (tetrium_pdec.svh: mode independent; the operand / address size selects),
 //    everything else in the BRAM microcode ROM indexed by page / opcode
-//    (+mod3, +reg for group opcodes)
-//  * the instruction pointer is not tracked here: every block carries its IP,
-//    so the IP of the current byte is {block_ip[15:3], offset}
+//    (+mod3, +reg for group opcodes; protected mode and I/O with the permission check
+//    have sequences of their own: pm_ent / io_ent)
+//  * the instruction pointer is not tracked here: every block carries the IP of its
+//    first byte, so the IP of the current byte is block_ip + offset (the code segment
+//    base need not be a multiple of 8)
 //  * prefixes (segment, 66, 67, LOCK, REP) and the 0F escape are consumed one
 //    per cycle; a prefix / escape right after an instruction is consumed together
 //    with it (skip: caught with the instruction in front, its state kept in sk_*);
@@ -39,7 +41,7 @@ module tetrium_decode (
     input  logic        q_pt,
     input  logic [31:0] q_ptgt,
     input  logic [31:3] q_lin,
-    input  logic [31:3] q_ip,
+    input  logic [31:0] q_ip,
     input  logic [3:0]  q_bid,
     output logic        q_full,
     // front-end flush (registered by the core)
@@ -75,20 +77,12 @@ module tetrium_decode (
     output logic [31:0] c_disp,
     output logic [31:0] c_imm_o,
     output logic [31:0] c_ip_start,    // first prefix
-    output logic [31:0] c_ip_op,       // opcode byte (the 0F escape for a two-byte opcode)
-    output logic [3:0]  c_len,         // opcode..end (ip_next = c_ip_op + c_len)
     output logic [31:0] c_ip_nx,       // IP of the next instruction
-    output logic        c_sovr_v,
-    output logic [2:0]  c_sovr,
     output logic [1:0]  c_rep,         // [1]=present [0]=F3
     output logic        c_os32,        // operand size 32
     output logic        c_as32,        // address size 32
     output logic        c_lock,
     output logic        c_ud,          // invalid form (bad LOCK, reserved modrm.reg): raises #UD
-    output logic [7:0]  c_eab,         // effective address: base register (one-hot)
-    output logic [8:0]  c_eai,         //                    index register (one-hot, [8] = AL)
-    output logic [1:0]  c_eas,         //                    index scale
-    output logic        c_dss,         // default segment SS (else DS)
     output logic [2:0]  c_sreg,
     output logic        c_pt,
     output logic [31:0] c_ptgt,
@@ -104,6 +98,14 @@ module tetrium_decode (
     output logic        q_empty,
     output logic        d_starve       // nothing to issue: no instruction caught or complete in the queue
 );
+  // effective-address selects and segment of the instruction in progress (the A selects of
+  // its later uops are decoded from them)
+  logic        c_sovr_v;
+  logic [2:0]  c_sovr;
+  logic [7:0]  c_eab;          // base register (one-hot)
+  logic [8:0]  c_eai;          // index register (one-hot, [8] = AL)
+  logic [1:0]  c_eas;          // index scale
+  logic        c_dss;          // default segment SS (else DS)
 `include "ucode_class.svh"
 `include "tetrium_asel.svh"
 `include "tetrium_pdec.svh"
@@ -115,7 +117,7 @@ module tetrium_decode (
   logic        qpt  [4];
   logic [31:0] qptg [4];
   logic [31:3] qlin [4];
-  logic [31:3] qip  [4];
+  logic [31:0] qip  [4];
   logic [3:0]  qbid [4];     // branch predictor snapshot id of the block
   logic [8*PDW-1:0] qpd [4]; // per-byte predecode
   logic [2:0]  cnt;
@@ -138,9 +140,8 @@ module tetrium_decode (
   wire         nbv   = cb ? (cnt >= 3'd3) : (cnt >= 3'd2);    // next block present
   wire  [2:0]  cb_e  = cb ? qe[1]  : qe[0];
   wire         cb_pt = cb ? qpt[1] : qpt[0];
-  wire  [2:0]  nb_e  = cb ? qe[2]  : qe[1];
   wire  [2:0]  nb_s  = cb ? qs[2]  : qs[1];
-  wire  [31:0] cur_ip = cb ? {qip[1], off} : {qip[0], off};
+  wire  [31:0] cur_ip = (cb ? qip[1] : qip[0]) + {29'd0, off};
 
   // length select form (see lsel): the shift tree on Cyclone V, or with DEC_LTREE (sim)
 `ifdef ALTERA
@@ -239,10 +240,6 @@ module tetrium_decode (
   lf_t       lf;
   assign     lf      = lfp[eoff[3:0]];
   wire       l_pfx   = lf.pfx;
-  wire       l_modrm = lf.modrm;
-  wire [2:0] l_immc  = lf.immc;
-  wire       l_sib   = lf.sib;
-  wire [2:0] l_disp  = lf.disp;
   wire [3:0] len     = lf.len;
   // Selecting a per-length table entry by the length.  Cyclone V: the length is never
   // formed as a binary sum on the capture path (a 5-term add, ~4 LUT levels there); the
@@ -281,11 +278,11 @@ module tetrium_decode (
   logic [7:0]  wb [11];
   lf_t         ir_lf;
   logic [PDW-1:0] pc0;           // predecode of the opcode byte
-  logic        pg, os32, as32, i_sv, i_lock, i_any;
+  logic        pg, os32, as32, i_sv, i_lock;
   logic [2:0]  i_s;
   logic [1:0]  i_rep;
-  logic [31:0] ir_ipstart, ir_curip, ir_ptgt;
-  logic [31:3] ir_cbip3;
+  logic [31:0] ir_ipstart, ir_ptgt;
+  logic [31:0] ir_cbip;
   logic [4:0]  ir_iend;
   logic        ir_pt;
   logic [3:0]  ir_bid;
@@ -564,8 +561,8 @@ module tetrium_decode (
   end
 `endif
   // next IP = block IP + iend (D2, from IR)
-  wire [31:3] cb_ip3 = cb ? qip[1] : qip[0];
-  wire [31:3] nx_ip3 = ir_cbip3 + {27'd0, ir_iend[4:3]};
+  wire [31:0] cb_ip = cb ? qip[1] : qip[0];
+  wire [31:0] nx_ip = ir_cbip + {27'd0, ir_iend};
   // a prefix / escape byte is always 1 byte long
   wire       pfx_ok    = hv && k_en[1] && !k_bad[1] && !bpfx;
 
@@ -698,7 +695,7 @@ module tetrium_decode (
     end
   // IP of the prefixes: a prefix skipped behind the instruction caught last cycle
   // starts where that instruction (still in IR) ends
-  wire [31:0] pfx_ip_e = (skq && !(pr_any && !iss_q)) ? {nx_ip3, ir_iend[2:0]} : pfx_ip;
+  wire [31:0] pfx_ip_e = (skq && !(pr_any && !iss_q)) ? nx_ip : pfx_ip;
   always_ff @(posedge clk) begin
     if (rst) begin
       eoff <= '0; wait_s <= 1'b0; skip <= 1'b0;
@@ -783,9 +780,7 @@ module tetrium_decode (
         // reaches their enables late)
         c_imm      <= inject_imm;
         c_ip_start <= inject_ips;
-        c_ip_op    <= inject_ips;
         c_ip_nx    <= inject_ipn;
-        c_len      <= 4'd0;
         c_sovr_v   <= 1'b0;
         c_rep      <= 2'b00;
         c_os32     <= inject_os32;
@@ -818,9 +813,7 @@ module tetrium_decode (
             c_imm      <= imm;
             ucnt       <= wb[3][4:0];              // ENTER nesting level
             c_ip_start <= ir_ipstart;
-            c_ip_op    <= pg ? ir_curip - 32'd1 : ir_curip;
-            c_ip_nx    <= {nx_ip3, ir_iend[2:0]};
-            c_len      <= pg ? ir_lf.len + 4'd1 : ir_lf.len;
+            c_ip_nx    <= nx_ip;
             c_sovr_v   <= i_sv;
             c_sovr     <= i_s;
             c_rep      <= i_rep;
@@ -879,10 +872,8 @@ module tetrium_decode (
       i_s        <= pfx_s;
       i_rep      <= pfx_rep;
       i_lock     <= pfx_lock;
-      i_any      <= pfx_any;
       ir_ipstart <= pfx_any ? pfx_ip_e : cur_ip;
-      ir_curip   <= cur_ip;
-      ir_cbip3   <= cb_ip3;
+      ir_cbip    <= cb_ip;
       ir_iend    <= iend;
       ir_pt      <= pt_end;
       ir_ptgt    <= qptg[{1'b0, cb} + ptblk];

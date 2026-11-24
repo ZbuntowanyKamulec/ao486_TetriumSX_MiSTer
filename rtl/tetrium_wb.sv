@@ -7,7 +7,7 @@
 // here into aligned 32-bit word entries {addr[31:2], byte enables, data}:
 // entry 0 = the word holding the first byte, entry 1 = the next word when the
 // store crosses a 32-bit boundary.  The same aligned view of the store in W
-// and of the store accepted last cycle is what M forwards loads from.
+// and of the store that was in W the cycle before is what M forwards loads from.
 //
 // Store buffer: SB_DEPTH word entries in distributed RAM.  A single-entry
 // store merges into the newest entry if it is the same word, that entry is
@@ -35,7 +35,8 @@ module tetrium_wb #(
     input  logic [1:0]  w_sz,         // 0: 1 byte, 1: 2 bytes, 2: 4 bytes
     input  logic [31:0] w_data,
     input  logic        w_two,        // store needs two entries (precomputed in E)
-    input  logic        w_nowr,       // no write (the entry only serves store-to-load forwarding)
+    input  logic        w_nowr,       // the store writes nothing (decided in E: a descriptor's accessed
+                                      //   bit already set, ARPL without a change): no entry, no bytes
     input  logic        w_skip0,      // CR0.NW: the first / second word hits the D-cache and is
     input  logic        w_skip1,      //   written there only (no write-through)
     output logic        hold_w,
@@ -47,7 +48,7 @@ module tetrium_wb #(
     output logic [3:0]  w_be1,        // zero unless the store has a second word
     output logic [31:0] w_d0,
     output logic [31:0] w_d1,
-    // ... and of the store accepted in the previous cycle (registered)
+    // ... and of the store that was in W in the previous cycle (registered)
     output logic        l_st_v,
     output logic [31:2] l_a0,
     output logic [31:2] l_a1,
