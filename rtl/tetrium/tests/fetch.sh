@@ -5,6 +5,7 @@
 #   ref/86box     86Box, the lockstep reference model (tb/x86ref/build.sh patches and builds it)
 #   ref/test386   test386.asm (tests/test386.sh)
 #   ref/tests386  SingleStepTests/80386, real-mode set (tests/conv386.sh, make test)
+#   ref/bochs     Bochs, a 486SX PC for the probes (tests/probe.sh builds it)
 set -e
 cd "$(dirname "$0")/.."
 mkdir -p ref
@@ -18,3 +19,4 @@ get() {   # dir url commit [sparse-checkout dirs]
 get 86box    https://github.com/86Box/86Box         7b2dbc034dd60b931faa0d42ec318dcccc8c86ac
 get test386  https://github.com/barotto/test386.asm cfd052d1e64d5375dea5a681c1eadeed64ceda2c
 get tests386 https://github.com/SingleStepTests/80386 459d49f v1_ex_real_mode
+get bochs    https://github.com/bochs-emu/Bochs      d214bbf542c8b1f7e0fa3dab37eba2250e551f70

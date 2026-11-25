@@ -12,7 +12,8 @@
 //    with an older in-flight store or is uncacheable is passed to E with
 //    'ldwait' set; E then re-reads through the late port (x_*) and requests
 //    line fills / uncached reads itself.  This keeps the stall network short.
-//  * W-stage store hit check is done here, at W time, on its own tag ports.
+//  * the store hit check is done here for the store in E (its own tag ports); W writes
+//    the words that hit.
 import tetrium_pkg::*;
 `include "tetrium_cfg.svh"
 module tetrium_mem #(
@@ -36,8 +37,8 @@ module tetrium_mem #(
     input  logic [31:0] m_lin,        // linear address of the first byte
     input  logic [31:2] m_lin4,       // word address of the next word
     input  logic [$clog2(`DC_KB * 1024 / `DC_WAYS) - $clog2(`LINE_B) - 2:0] m_tset0, m_tset1,   // tag sets per line-parity bank (lin / lin + 4)
-    // paging: physical page of the access (A2 last-page check / M replay), usable for the
-    // uop's access (rights, D), PCD; M replays a last-page miss (holds, re-reads its rows)
+    // paging: physical page of the access (A2 micro-TLB check / M replay), usable for the
+    // uop's access (rights, D), PCD; M replays a micro-TLB miss (holds, re-reads its rows)
     input  logic [31:12] m_ppn,
     input  logic        m_pok,
     input  logic        m_pcd,
@@ -68,7 +69,7 @@ module tetrium_mem #(
     input  logic        w_hhi,        //                           second word's line
     input  logic [1:0]  w_wlo,        // ... and its way
     input  logic [1:0]  w_whi,
-    // store accepted last cycle (forwarding: its cache write is not readable yet)
+    // the store that was in W last cycle (forwarding: its cache write is not readable yet)
     input  logic        l_st_v,
     input  logic [31:2] l_a0,
     input  logic [31:2] l_a1,
@@ -103,7 +104,7 @@ module tetrium_mem #(
     input  logic [1:0]  fill_hm,
     input  logic [63:0] fill_data,
     input  logic        fill_done,
-    // snoop invalidate (DMA)
+    // snoop invalidate (DMA, page walker A / D writes)
     input  logic        inv_all,      // invalidate every line (INVD / WBINVD / FLUSH): the tag sweep
     output logic        inv_busy,     // ... requested or running
     input  logic        snp_v,
@@ -113,7 +114,7 @@ module tetrium_mem #(
     output logic        m_ldwait,
     output logic [15:0] m_fwd         // per load byte {valid, entry, lane[1:0]} of the store in E
 );
-  genvar w, b, k;
+  genvar w, b;
 `include "tetrium_mtype.svh"
   wire mrd = m_uw[UW_MRD_L] && !m_noacc;
 
@@ -124,11 +125,10 @@ module tetrium_mem #(
   localparam int ROWB  = WAYB - 3;                    // 8-byte rows per way
   localparam int SETB  = WAYB - LB;
   localparam int TAGB  = 32 - WAYB;
-  localparam int BEATB = LB - 2;                      // 32-bit beats per line (log2)
   localparam int TE    = TAGB + 1;                    // tag entry {valid, tag}
   // virtually indexed, physically tagged: the index must lie within the 4 KB page
   initial assert (WAYB <= 12) else $error("D-cache way larger than 4 KB (DC_KB / DC_WAYS)");
-  // physical word addresses of the access (page from the last-page registers)
+  // physical word addresses of the access (page from the micro-TLB or the replay)
   wire [31:2] p_a0 = {m_ppn, m_lin[11:2]};
   wire [31:2] p_a4 = {pg ? m_ppn : m_lin4[31:12], m_lin4[11:2]};
 
@@ -316,9 +316,9 @@ module tetrium_mem #(
 
   // ---------------------------------------------------------------- store-to-load forwarding
   // Byte lanes of aligned words: the load's two words {m_lin[31:2], m_lin4}
-  // against the word entries of the store in W and of the store accepted last
-  // cycle (their data is in registers); the store in E is forwarded in E (it
-  // is in W by then).  Youngest store first.
+  // against the word entries of the store in W and of the store that was in W
+  // the cycle before (their data is in registers); the store in E is forwarded in
+  // E (it is in W by then).  Youngest store first.
   // forwarded lane bytes of load word a: {hit[3:0], data[31:0]}
   function automatic logic [35:0] fwdw(input logic [31:2] a);
     logic [3:0]  h;
@@ -490,7 +490,7 @@ module tetrium_mem #(
       ia_pend  <= 1'b0;
     end else begin
       if (inv_all) ia_pend <= 1'b1;
-      // DMA snoop: invalidate all ways of the set (conservative), the cycle after it
+      // snoop (DMA, walker write): invalidate all ways of the set (conservative), the cycle after it
       // (it has the tag port first: a new snoop never replaces one not yet applied)
       if (snp_v) begin sinv_v <= 1'b1; sinv_l <= snp_line; end
       else if (st != S_INIT) sinv_v <= 1'b0;

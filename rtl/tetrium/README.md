@@ -27,8 +27,9 @@ micro-op, and one completes per cycle. The main design decisions:
   write port in W (store buffer, store-to-load forwarding), so read-modify-write also takes
   one.
 - **TLB off the hit path.** The caches are virtually indexed and physically tagged (4 KB
-  ways). Per-page micro-TLBs for fetch and data sit in front of an i486-organized TLB, an
-  L2 TLB and a hardware page walker.
+  ways). 16-entry micro-TLBs for fetch and data (the data one looked up in A2 from base
+  and offset, without waiting for their sum) sit in front of an i486-organized TLB, a
+  1024-entry 4-way L2 TLB and a hardware page walker.
 - **Microcode in block RAM**, generated from Python. Each micro-op word carries the address
   fields of its successor, keeping the ROM's latency out of the address path. Far
   transfers, gates, interrupts and task switches are micro-op sequences.
@@ -53,7 +54,8 @@ the first column point to the notes below.
 | `PUSH reg` / `POP reg` ⁴ | 1 | 1 |
 | `MOVSX`, `MOVZX`, `SETcc`, `BT reg` ¹ | 1 | 3 |
 | shift / rotate `reg, 1` | 1 | 3 |
-| shift / rotate `reg, imm` / `reg, CL` | 2 | 2–3 (`RCL`, `RCR`: 8) |
+| `SHL`, `SHR`, `SAR` `r32, imm`; `SHLD r32, r32, imm` ¹ ⁸ | 1 | 2 |
+| other shifts / rotates, `reg, imm` / `reg, CL` | 2 | 2–3 (`RCL`, `RCR`: 8) |
 | `MUL`, `IMUL`, 16 / 32-bit | 4 | 13 |
 | `DIV`, `IDIV`, 16 / 32-bit | 20 / 36 | 24 / 40 |
 | `XADD reg` / `CMPXCHG reg` ¹ | 1 / 3 | 3 / 6 |
@@ -88,6 +90,8 @@ the first column point to the notes below.
 6. **String start-up.** About 2 cycles before the first element.
 7. **Branch prediction.** Correctly predicted (BTB, direction predictor, return stack). A
    mispredicted branch: +8.
+8. **Shifts by an immediate.** Count not 0. Right after an instruction that wrote one of the
+   source registers: 2.
 
 `tests/clocks.py` measures every form.
 
@@ -95,8 +99,8 @@ the first column point to the notes below.
 
 | FPGA | Tool | fmax | Logic | RAM | DSP |
 |---|---|---|---|---|---|
-| Artix-7 (`xc7a100t-1`) | Vivado 2025.2, implementation | 95.1–98.0 MHz | 23.8k LUTs (2.4k as RAM), 11.5k FFs | 31 BRAM36 | 4 |
-| Cyclone V (`5CSEBA6U23I7`) | Quartus 17, fit (worst corner) | 85.1–87.0 MHz | 20.0k ALMs, 13.4k registers | 139 M10K, 90 kbit MLAB | 3 |
+| Artix-7 (`xc7a100t-1`) | Vivado 2025.2, implementation | 95.7–99.3 MHz | 24.5k LUTs (2.4k as RAM), 11.8k FFs | 34 BRAM36 | 4 |
+| Cyclone V (`5CSEBA6U23I7`) | Quartus 17, fit (worst corner) | 82.8–87.0 MHz | 20.5k ALMs, 13.6k registers | 139 M10K, 90 kbit MLAB | 3 |
 
 The CPU alone (I/O as virtual pins), maximum-performance settings, three runs each
 (Quartus seeds, Vivado placer directives).
@@ -108,8 +112,8 @@ In simulation (32-bit flat protected mode, warm caches; gcc 13
 
 | Benchmark | Per MHz | CPI |
 |---|---|---|
-| Dhrystone 2.1 | 0.833 DMIPS/MHz | 1.17 |
-| CoreMark (2K performance run) | 2.309 CoreMark/MHz | 1.26 |
+| Dhrystone 2.1 | 0.836 DMIPS/MHz | 1.17 |
+| CoreMark (2K performance run) | 2.325 CoreMark/MHz | 1.25 |
 
 Dhrystone uses the source and settings of z486's Dhrystone comparison. `tests/perf.sh`
 reproduces both.
@@ -118,8 +122,8 @@ On a MiSTer (ao486-based core, CPU at 69.23 MHz):
 
 | Benchmark | Result |
 |---|---|
-| Doom 1.9, `-timedemo demo3`, high detail, full screen | 37.55 FPS |
-| 3DBench 1.0c | 99.9 FPS |
+| Doom 1.9, `-timedemo demo3`, high detail, full screen | 40.48 FPS |
+| 3DBench 1.0c | 100.2 FPS |
 | CPU-Z 1.04 Vintage Edition, Windows 98 SE | 101.5 (Pentium 75 reference: 98.0) |
 
 ## Interface
@@ -136,8 +140,7 @@ On a MiSTer (ao486-based core, CPU at 69.23 MHz):
 - `halted`, `shutdown` (triple fault)
 
 Parameters set the bus width, cacheable and write-combining regions, the reset CS base and
-`CR0`, the CPU signature, `CPUID` and the debug registers. Cache and TLB sizes are in
-`rtl/tetrium_cfg.svh`.
+`CR0`, the CPU signature and `CPUID`. Cache and TLB sizes are in `rtl/tetrium_cfg.svh`.
 
 ## Verification
 
@@ -148,17 +151,23 @@ from a real 486 (`tb/x86ref/86box-486.patch`).
 ```sh
 tests/fetch.sh      # 86Box, test386.asm and SingleStepTests/80386 into ref/
 tests/conv386.sh    # convert the SingleStepTests
+tests/run.sh        # the test suites in one run: quick (default), full or chosen ones; -l lists them
 make sim            # Verilator testbench (Verilator 5)
 make test           # SingleStepTests/80386, real mode
 tests/test386.sh    # test386.asm in lockstep
 tests/pm.sh         # protected-mode and paging directed tests
-tests/rlock.sh      # random programs in lockstep (PM=1: protected mode, PG=1: paging)
+tests/rlock.sh      # random programs in lockstep (PM=1: protected mode, PG=1: paging, D32=1: 32-bit code,
+                    #   R3=1 / RING=1, 2: ring 3 / 1, 2, V86=1: virtual-8086 mode, IRQ=1: with interrupts,
+                    #   NMI=1: with NMIs)
 tests/lock.sh       # benchmarks and directed tests in lockstep
 tests/clocks.py     # cycles per instruction form, against the i486
+tests/probe.sh      # 486 behaviour probes: the core against a Bochs 486 PC (bootable floppies)
 tests/perf.sh       # Dhrystone and CoreMark
 ```
 
-`tests/hwstress` is a bootable stress test for a complete PC built around the CPU.
+Two bootable tests for a complete PC built around the CPU: `tests/hwstress` (stress test) and
+`tests/hwcheck` (self-checking: random programs generated on the machine, protected-mode,
+paging, debug register and task switch rules against software models).
 
 ## License
 

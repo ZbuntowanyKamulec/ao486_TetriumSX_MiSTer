@@ -3,7 +3,24 @@
 # Copyright (C) 2026 ZbuntowanyKamulec
 """Random real-mode 386/486 program generator for the 86Box lockstep test.
 
-Usage: rgen386.py <out.bin> <seed> [nretire] [--pm]
+Usage: rgen386.py <out.bin> <seed> [nretire] [--pm | --pg] [--irq]
+
+--d32 (with --pm / --pg, 'RPMD' / 'RPGD' file): the program runs in a 32-bit code segment
+(selector 1000, D set): each instruction gets its 66 / 67 prefixes toggled, so it keeps its
+operand / address size; 70 % of the operands and 60 % of the addresses are 32-bit, most
+instructions without a size prefix.  The handlers stay 16-bit code: the IDT gates point to
+selector 38 (16-bit, same base).
+
+--r3 / --r2 / --r1 (with --pm / --pg, 4th letter U / P / X, with --d32 W / Q / Y): the program
+runs at ring 3 / 2 / 1 (code, stack and data segments of that DPL, CS / SS RPL the ring), entered
+by IRET with a random IOPL; the handlers run at ring 0 (stack from the TSS).
+
+--v86 (alone or with --pg, 'RPMV' / 'RPGV' file): the real-mode programs in virtual-8086 mode:
+the prologue enters V86 by IRETD (random IOPL 0 / 3), the handlers run at ring 0 through 32-bit
+gates (32-bit frames, IRETD).
+
+--irq: for runs with INTR (the testbench's -i): IF set at the start, CLI is always followed by
+STI, PUSH imm / POPF sets IF 80 % of the time.  INTR uses vector 8 (an IRET stub).
 
 --pg: --pm with paging ('RPG3' file): the testbench maps the first MB (directory 8D000,
 table 8E000) with random not-present, read-only (CR0.WP set), aliased and PCD data
@@ -11,7 +28,8 @@ pages and not-present code pages; a #PF handler at FE00 sets P and W in the PTE,
 INVLPGs and restarts.  MOV CR3 only reloads it, MOV CR0 keeps PE / PG / WP.
 
 --pm: the same programs in 16-bit protected mode ('RPM3' file): the testbench builds a
-GDT whose selectors equal the real-mode segment values (same bases, 64 KB limits) plus
+GDT whose selectors equal the real-mode segment values (same bases, 64 KB limits; for 7
+seeds in 8 the code segment's base is 1FFF8h + 1..7, not a multiple of 8, a copy of the program) plus
 test descriptors (TSTSEL), and an IDT of 16-bit interrupt gates to the IVT handlers;
 a prologue at FF00 sets PE and jumps to the program.  Segment loads also use the test
 selectors (faults are resumed as usual), system items keep PE and the tables.
@@ -44,7 +62,112 @@ SEGPFX = [0x26, 0x36, 0x3E, 0x64, 0x65]      # never CS
 H_FAULT, H_TABLE, H_CTR, H_IRET = 0xF000, 0xF100, 0xF300, 0xFFF0
 FAULT_VECS = (0, 5, 6, 7, 12, 13)
 PG = '--pg' in sys.argv
-PM = ('--pm' in sys.argv) or PG
+IRQ = '--irq' in sys.argv          # IF set at the start, CLI always followed by STI, POPF mostly with IF
+D32 = '--d32' in sys.argv          # (with --pm / --pg) a 32-bit code segment: see xform()
+RING = 3 if '--r3' in sys.argv else 2 if '--r2' in sys.argv else 1 if '--r1' in sys.argv else 0
+R3 = RING > 0                      # (with --pm / --pg) the program runs at an outer ring
+if R3:
+    SS = 0x7000 | RING             # (a stack selector has the RPL of the ring)
+    DSEGS = [DS, ES, FS, GS, SS]
+PO, PA = (0.7, 0.6) if D32 else (0.3, 0.12)     # chance of a 32-bit operand / address (before xform)
+
+
+def ilen16(b):
+    """length of the 16-bit-code instruction at the start of b (len(b) if not decodable)"""
+    i, os_, as_ = 0, 0, 0
+    while i < len(b) and b[i] in (0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65):
+        os_ ^= b[i] == 0x66
+        as_ ^= b[i] == 0x67
+        i += 1
+    if i >= len(b):
+        return len(b)
+    op = b[i]
+    i += 1
+    z = 4 if os_ else 2
+    mr, imm = 0, 0
+    if op == 0x0F:
+        if i >= len(b):
+            return len(b)
+        op = b[i]
+        i += 1
+        if op <= 3 or 0x20 <= op <= 0x26 or 0x90 <= op <= 0x9F or op in (0xA3, 0xA5, 0xAB, 0xAD, 0xAF) or \
+                0xB0 <= op <= 0xB7 or 0xBB <= op <= 0xC1:
+            mr = 1
+        elif op in (0xA4, 0xAC, 0xBA):
+            mr, imm = 1, 1
+        elif 0x80 <= op <= 0x8F:
+            imm = z
+        elif op in (0x06, 0x08, 0x09) or 0xA0 <= op <= 0xA2 or 0xA8 <= op <= 0xAA or 0xC8 <= op <= 0xCF:
+            pass
+        else:
+            return len(b)
+    elif op < 0x40:
+        mr, imm = (op & 7) < 4, {4: 1, 5: z}.get(op & 7, 0)
+    elif op < 0x62:
+        pass
+    elif op in (0x62, 0x63, 0xC4, 0xC5, 0xFE, 0xFF) or 0x84 <= op <= 0x8F or 0xD0 <= op <= 0xD3 or 0xD8 <= op <= 0xDF:
+        mr = 1
+    elif op in (0x68, 0xA9, 0xE8, 0xE9) or 0xB8 <= op <= 0xBF:
+        imm = z
+    elif op in (0x69, 0x81, 0xC7):
+        mr, imm = 1, z
+    elif op in (0x6A, 0xA8, 0xCD, 0xD4, 0xD5, 0xEB) or 0x70 <= op <= 0x7F or 0xB0 <= op <= 0xB7 or 0xE0 <= op <= 0xE7:
+        imm = 1
+    elif op in (0x6B, 0x80, 0x82, 0x83, 0xC0, 0xC1, 0xC6):
+        mr, imm = 1, 1
+    elif op in (0x9A, 0xEA):
+        imm = z + 2
+    elif 0xA0 <= op <= 0xA3:
+        imm = 4 if as_ else 2
+    elif op in (0xC2, 0xCA):
+        imm = 2
+    elif op == 0xC8:
+        imm = 3
+    elif op in (0xF6, 0xF7):
+        mr = 2
+    if mr:
+        m = b[i]
+        i += 1
+        mod, rm = m >> 6, m & 7
+        if mr == 2 and ((m >> 3) & 7) < 2:
+            imm = 1 if op == 0xF6 else z
+        if mod != 3:
+            if as_:
+                if rm == 4:
+                    if mod == 0 and (b[i] & 7) == 5:
+                        i += 4
+                    i += 1
+                elif mod == 0 and rm == 5:
+                    i += 4
+                i += {1: 1, 2: 4}.get(mod, 0)
+            else:
+                i += (2 if mod == 0 and rm == 6 else 0) + {1: 1, 2: 2}.get(mod, 0)
+    return min(i + imm, len(b))
+
+
+def tog(b):
+    """one instruction for a 32-bit code segment: 66 and 67 toggled (same operand / address size)"""
+    i = 0
+    while i < len(b) and b[i] in (0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65):
+        i += 1
+    p = list(b[:i])
+    q = [x for x in p if x not in (0x66, 0x67)]
+    q += ([] if 0x66 in p else [0x66]) + ([] if 0x67 in p else [0x67])
+    return bytes(q) + bytes(b[i:])
+
+
+def xform(b):
+    """16-bit code bytes -> the same instructions for a 32-bit code segment (D32)"""
+    if not D32:
+        return bytes(b)
+    out, i = b'', 0
+    while i < len(b):
+        n = ilen16(b[i:])
+        out += tog(b[i:i + n])
+        i += n
+    return out
+V86 = '--v86' in sys.argv          # real-mode style programs in virtual-8086 mode (with or without --pg)
+PM = ('--pm' in sys.argv) or PG or V86       # (the protected-mode machinery: tables, handlers, prologue)
 # protected mode: test selectors (see tb/tb_main.cpp: rpm_tables) and the GDT limit
 TSTSEL = [0x0000, 0x0003, 0x0008, 0x0010, 0x0018, 0x0020, 0x0028, 0x0030, 0x0038, 0x0040, 0x004B, 0xFFF8]
 H_PRO, H_GDTR, H_IDTR, H_EC1, H_EC2 = 0xFF00, 0xFFC0, 0xFFC8, 0xFFE0, 0xFFE8
@@ -125,8 +248,8 @@ class Gen:
         r = self.r
         regw = w if regw is None else regw
         rmw = w if rmw is None else rmw
-        os32 = (a66 and r.random() < 0.3) if os is None else os
-        as32 = (a67 and mode is not None and r.random() < 0.12) if as_ is None else as_
+        os32 = (a66 and r.random() < PO) if os is None else os
+        as32 = (a67 and mode is not None and r.random() < PA) if as_ is None else as_
         p = []
         if os32:
             p.append(0x66)
@@ -202,7 +325,7 @@ class Gen:
             elif c == 6:
                 self.ins([0x8D], mode='mem', seg=False)
             else:         # mov ax, seg ; mov sreg, ax
-                sel = r.choice(TSTSEL) if PM and r.random() < 0.3 else r.choice(DSEGS)
+                sel = r.choice(TSTSEL) if PM and not V86 and r.random() < 0.3 else r.choice(DSEGS)
                 self.emit([0xB8] + list(struct.pack('<H', sel)) +
                           [0x8E, 0xC0 | (r.choice([0, 3, 4, 5]) << 3)])
         elif k < 0.46:    # INC / DEC / group 3
@@ -223,7 +346,10 @@ class Gen:
         elif k < 0.58:    # one-byte
             op = r.choice([0x27, 0x2F, 0x37, 0x3F, 0x9E, 0x9F, 0xD6, 0xF5, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD,
                            0x90, 0x9B, 0x98, 0x99, 0x98, 0x99] + [0x90 + x for x in (1, 2, 3, 5, 6, 7)])
-            self.ins([op], a66=(op >= 0x91 and op <= 0x99))
+            if IRQ and op == 0xFA:
+                self.emit([0xFA, 0xFB])                     # cli ; sti  (STI holds INTR off for one instruction)
+            else:
+                self.ins([op], a66=(op >= 0x91 and op <= 0x99))
         elif k < 0.62:
             c = r.randrange(5)
             if c == 0:
@@ -333,8 +459,8 @@ class Gen:
         a = r.randrange(0x7FF0)
         o = [0x66] if r.random() < 0.3 else []
         c = r.randrange(10)
-        if PM and c in (1, 2):
-            c = 0       # (protected mode: the tables stay)
+        if PM and not R3 and not V86 and c in (1, 2):
+            c = 0       # (protected mode: the tables stay; at ring 3 LGDT / LIDT fault)
         if c == 0:      # SGDT / SIDT
             self.emit(o + [0x0F, 0x01, 0x06 | (r.randrange(2) << 3)] + list(struct.pack('<H', a)))
         elif c == 1:    # LGDT (any value: no effect in real mode)
@@ -411,6 +537,8 @@ class Gen:
                 self.ins([op], imm={0x68: 'z', 0x6A: 'b', 0x9C: None}[op])
             elif c == 8:  # push imm ; popf   (TF clear)
                 fl = r.randrange(65536) & ~0x0100
+                if IRQ and r.random() < 0.8:
+                    fl |= 0x0200
                 if r.random() < 0.3:
                     self.emit([0x66, 0x68] + list(struct.pack('<I', fl | (r.randrange(4) << 16))) + [0x66, 0x9D])
                 else:
@@ -464,7 +592,12 @@ class Gen:
             if c == 0:
                 self.emit([0xCC])
             elif c == 1:
-                self.emit([0xCD, r.randrange(256)])
+                # (protected mode: not the vectors of exceptions with an error code, whose handlers
+                # drop one that INT n does not push)
+                v = r.randrange(256)
+                while PM and v in (8, 10, 11, 12, 13, 14, 17):
+                    v = r.randrange(256)
+                self.emit([0xCD, v])
             else:
                 self.emit([0xCE])
 
@@ -474,15 +607,30 @@ class Gen:
         g2.nw = self.nw
         for _ in range(r.randrange(0, 4)):
             g2.simple()
-        body = b''.join(x[1] for x in g2.items)
+        body = b''.join(xform(x[1]) for x in g2.items)
         o = [0x66] if os32 else []
-        jl = 5 if os32 else 3                       # length of the jmp over
-        call = ([0x0E] if far else []) + o + [0xE8] + list(struct.pack('<i' if os32 else '<h', jl))
-        jmp = o + [0xE9] + list(struct.pack('<i' if os32 else '<h', len(body) + 1 + len(o)))
-        if os32:
-            jl = len(jmp)
-            call = o + [0xE8] + list(struct.pack('<i', jl))
-        self.emit(bytes(call) + bytes(jmp) + body + bytes(o + [0xCB if far else 0xC3]))
+        n = 4 if os32 else 2
+        pk = '<i' if os32 else '<h'
+        ret = xform(bytes(o + [0xCB if far else 0xC3]))
+        jmp = xform(bytes(o + [0xE9] + [0] * n))
+        jmp = jmp[:-n] + struct.pack(pk, len(body) + len(ret))
+        call = xform(bytes(o + [0xE8] + [0] * n))
+        call = (xform(bytes([0x0E])) if far else b'') + call[:-n] + struct.pack(pk, len(jmp))
+        self.items.append(('bx', call + jmp + body + ret))         # (already in final form)
+
+    def final(self, it):
+        """an item in its final form ('bx' -> 'b'; D32: prefixes toggled, see xform)"""
+        if it[0] == 'bx':
+            return ('b', it[1])
+        if not D32:
+            return it
+        if it[0] == 'b':
+            return ('b', xform(it[1]))
+        if it[0] == 'br':
+            return ('br', tog(it[1]), it[2])
+        pre, suf = it[1], it[2]                 # 'abs': the suffix of a far JMP is its selector
+        far = pre[-1] == 0xEA
+        return ('abs', tog(pre), suf if far else tog(suf))
 
     def build(self, limit):
         r = self.r
@@ -490,6 +638,7 @@ class Gen:
         while size < limit:
             n = len(self.items)
             self.one()
+            self.items[n:] = [self.final(it) for it in self.items[n:]]
             for it in self.items[n:]:
                 size += len(it[1]) + (it[2] if it[0] == 'br' else 2 + len(it[2]) if it[0] == 'abs' else 0)
         addr = 0
@@ -512,7 +661,10 @@ class Gen:
             else:
                 b = it[1] + struct.pack('<H', r.choice(starts)) + it[2]
                 code[a:a + len(b)] = b
-        code[addr:addr + 3] = bytes([0xE9]) + struct.pack('<H', -(addr + 3) & 0xFFFF)       # back to the start
+        if D32:     # (jmp rel16 with 66 in 32-bit code)
+            code[addr:addr + 4] = bytes([0x66, 0xE9]) + struct.pack('<H', -(addr + 4) & 0xFFFF)
+        else:
+            code[addr:addr + 3] = bytes([0xE9]) + struct.pack('<H', -(addr + 3) & 0xFFFF)   # back to the start
         # fault handler: resume at the next entry of a table of instruction starts
         h = bytes([0x53, 0x55, 0x89, 0xE5,                                  # push bx ; push bp ; mov bp, sp
                    0x2E, 0x8B, 0x1E]) + struct.pack('<H', H_CTR) + \
@@ -520,36 +672,70 @@ class Gen:
                    0x2E, 0x89, 0x1E]) + struct.pack('<H', H_CTR) + \
             bytes([0x2E, 0x8B, 0x9F]) + struct.pack('<H', H_TABLE) + \
             bytes([0x89, 0x5E, 0x04, 0x5D, 0x5B, 0xCF])                     # mov [bp+4], bx ; pop bp ; pop bx ; iret
+        if PM:
+            # (protected mode: CS is not writable; the counter lives in the data segment 3000)
+            h = bytes([0x53, 0x55, 0x1E, 0x89, 0xE5,                    # push bx ; push bp ; push ds ; mov bp, sp
+                       0xBB, 0x00, 0x30, 0x8E, 0xDB,                      # mov bx, 3000 ; mov ds, bx
+                       0x8B, 0x1E]) + struct.pack('<H', H_CTR) + \
+                bytes([0x43, 0x43, 0x81, 0xE3, 0xFE, 0x01,                  # inc bx ; inc bx ; and bx, 1FE
+                       0x89, 0x1E]) + struct.pack('<H', H_CTR) + \
+                bytes([0x2E, 0x8B, 0x9F]) + struct.pack('<H', H_TABLE) + \
+                bytes([0x89, 0x5E, 0x06, 0x1F, 0x5D, 0x5B, 0xCF])         # mov [bp+6], bx ; pop ds ; pop bp ; pop bx ; iret
+            if V86:     # (32-bit gates: EIP, CS, EFLAGS, ESP, SS, ES, DS, FS, GS; back to V86 by IRETD)
+                h = h[:-1] + bytes([0x66, 0xCF])
         code[H_FAULT:H_FAULT + len(h)] = h
         for i in range(256):
             code[H_TABLE + 2 * i:H_TABLE + 2 * i + 2] = struct.pack('<H', r.choice(starts))
         code[H_CTR:H_CTR + 2] = b'\0\0'
         code[H_IRET] = 0xCF
+        if V86:
+            code[H_IRET:H_IRET + 2] = bytes([0x66, 0xCF])
         if PM:
-            # prologue: pushf, push eax, lgdt / lidt cs:[..], CR0.PE, pop eax, popf, jmp 1000:0000
-            pro = bytes([0x9C, 0x66, 0x50, 0x2E, 0x66, 0x0F, 0x01, 0x16]) + struct.pack('<H', H_GDTR) + \
+            # prologue: pushf, cli, push eax, lgdt / lidt cs:[..], CR0.PE, pop eax, then 1000:0000 and the
+            # flags by IRET (no interrupt between LIDT and the program: in real mode the IDTR moves the
+            # vector table; between POPF and a far JMP CS would still be the real-mode one)
+            pro = bytes([0x9C, 0xFA, 0x66, 0x50, 0x2E, 0x66, 0x0F, 0x01, 0x16]) + struct.pack('<H', H_GDTR) + \
                   bytes([0x2E, 0x66, 0x0F, 0x01, 0x1E]) + struct.pack('<H', H_IDTR)
             if PG:      # CR3, then PE | WP | PG
                 pro += bytes([0x66, 0xB8]) + struct.pack('<I', PD_ADDR) + bytes([0x0F, 0x22, 0xD8]) + \
                        bytes([0x0F, 0x20, 0xC0, 0x66, 0x0D]) + struct.pack('<I', 0x80010001)
             else:
                 pro += bytes([0x0F, 0x20, 0xC0, 0x0C, 0x01])
-            pro += bytes([0x0F, 0x22, 0xC0, 0x66, 0x58, 0x9D, 0xEA, 0x00, 0x00]) + struct.pack('<H', CS)
+            if V86:     # TR, then V86 by IRETD: GS FS DS ES SS ESP, EFLAGS (VM, random IOPL), CS, EIP (EAX not kept)
+                fl = 0x20002 | (0x0200 if IRQ else 0) | (r.randrange(2) << 10) | (r.choice([0, 3]) << 12)
+                pro = bytes([0xFA]) + pro[4:]
+                pro += bytes([0x0F, 0x22, 0xC0, 0xB8, 0x68, 0x00, 0x0F, 0x00, 0xD8, 0x66, 0x0F, 0xB7, 0xC4])
+                for sg in (GS, FS, DS, ES, SS):
+                    pro += bytes([0x66, 0x68]) + struct.pack('<I', sg)
+                pro += bytes([0x66, 0x50, 0x66, 0x68]) + struct.pack('<I', fl) + bytes([0x66, 0x68]) + \
+                       struct.pack('<I', CS) + bytes([0x66, 0x6A, 0x00, 0x66, 0xCF])
+            elif R3:    # TR, then the ring by IRET: SS 700r, SP, flags (random IOPL), CS 100r, IP 0 (EAX not kept)
+                fl = 0x0002 | (0x0200 if IRQ else 0) | (r.randrange(2) << 10) | (r.choice([0, 3]) << 12)
+                pro = bytes([0xFA]) + pro[4:]       # (cli; no PUSHF / PUSH EAX: the frame is built below)
+                pro += bytes([0x0F, 0x22, 0xC0, 0xB8, 0x68, 0x00, 0x0F, 0x00, 0xD8, 0x89, 0xE0,
+                              0x68]) + struct.pack('<H', SS) + bytes([0x50, 0x68]) + struct.pack('<H', fl) + \
+                       bytes([0x68]) + struct.pack('<H', CS | RING) + bytes([0x6A, 0x00, 0xCF])
+            else:
+                pro += bytes([0x0F, 0x22, 0xC0, 0x66, 0x58, 0x68]) + struct.pack('<H', CS) + bytes([0x6A, 0x00, 0xCF])
+            assert len(pro) <= H_GDTR - H_PRO, len(pro)
             code[H_PRO:H_PRO + len(pro)] = pro
             code[H_GDTR:H_GDTR + 6] = struct.pack('<HI', 0xB007, 0x80000)
             code[H_IDTR:H_IDTR + 6] = struct.pack('<HI', 0x7FF, 0x8C000)
             # error code stubs: drop it, then the fault handler / IRET
-            code[H_EC1:H_EC1 + 6] = bytes([0x83, 0xC4, 0x02, 0xE9]) + struct.pack('<h', H_FAULT - (H_EC1 + 6))
-            code[H_EC2:H_EC2 + 4] = bytes([0x83, 0xC4, 0x02, 0xCF])
+            ec = 4 if V86 else 2            # (a 32-bit gate pushes a dword)
+            code[H_EC1:H_EC1 + 6] = bytes([0x83, 0xC4, ec, 0xE9]) + struct.pack('<h', H_FAULT - (H_EC1 + 6))
+            code[H_EC2:H_EC2 + 5] = bytes([0x83, 0xC4, ec]) + (bytes([0x66, 0xCF]) if V86 else bytes([0xCF, 0x90]))
         if PG:
             # #PF: PTE of CR2 |= P | W (table through selector 58), INVLPG (flat 50), restart
             pf = bytes([0x66, 0x50, 0x1E,                                   # push eax ; push ds
                         0xB8]) + struct.pack('<H', SEL_PT) + bytes([0x8E, 0xD8,   # mov ax, 58 ; mov ds, ax
                         0x0F, 0x20, 0xD0, 0x66, 0xC1, 0xE8, 0x0C,               # mov eax, cr2 ; shr eax, 12
-                        0x67, 0x66, 0x83, 0x0C, 0x85, 0, 0, 0, 0, 0x03,         # or dword [eax*4], 3
+                        0x67, 0x66, 0x83, 0x0C, 0x85, 0, 0, 0, 0, 0x07,         # or dword [eax*4], 7 (P W U)
                         0xB8]) + struct.pack('<H', SEL_FLAT) + bytes([0x8E, 0xD8,  # mov ax, 50 ; mov ds, ax
                         0x0F, 0x20, 0xD0, 0x67, 0x0F, 0x01, 0x38,               # mov eax, cr2 ; invlpg [eax]
                         0x1F, 0x66, 0x58, 0x83, 0xC4, 0x02, 0xCF])              # pop ds ; pop eax ; add sp, 2 ; iret
+            if V86:     # (error code dword; IRETD)
+                pf = pf[:-4] + bytes([0x83, 0xC4, 0x04, 0x66, 0xCF])
             code[H_PF:H_PF + len(pf)] = pf
         return bytes(code)
 
@@ -566,12 +752,14 @@ def main():
     seg = [ES, CS, SS, DS, FS, GS]
     ivt = [H_FAULT if v in FAULT_VECS else H_IRET for v in range(256)]
     if PM:          # (vectors with an error code: through a stub that drops it)
-        ivt = [H_EC1 if v in (12, 13) else H_EC2 if v in (10, 11, 14, 17) else ivt[v] for v in range(256)]
+        # (#TS #NP #SS #GP #AC: drop the error code and resume elsewhere; a restart would fault again)
+        ivt = [H_EC1 if v in (10, 11, 12, 13, 17) else H_EC2 if v == 14 else ivt[v] for v in range(256)]
     if PG:
         ivt[14] = H_PF
     with open(out, 'wb') as f:
-        f.write((b'RPG3' if PG else b'RPM3' if PM else b'R386') + struct.pack('<II', seed, nret) + struct.pack('<8I', *gpr) +
-                struct.pack('<6H', *seg) + struct.pack('<II', H_PRO if PM else 0, 0x0002 | (r.randrange(2) << 10)) +
+        kind = b'V' if V86 else (b'WQY' if D32 else b'UPX')[3 - RING:4 - RING] if R3 else b'D' if D32 else b'3'
+        f.write(((b'RPG' if PG else b'RPM') + kind if PM else b'R386') + struct.pack('<II', seed, nret) + struct.pack('<8I', *gpr) +
+                struct.pack('<6H', *seg) + struct.pack('<II', H_PRO if PM else 0, 0x0002 | (r.randrange(2) << 10) | (0x0200 if IRQ else 0)) +
                 struct.pack('<256H', *ivt) + code)
 
 

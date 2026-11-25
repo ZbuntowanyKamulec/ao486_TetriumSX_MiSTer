@@ -68,9 +68,6 @@ module tetrium_biu #(
     input  logic [31:0] io_wdata,
     output logic        io_done,
     output logic [31:0] rdata32,      // read result, right-aligned (valid with *_done)
-    // store snoop (I-cache invalidation)
-    output logic        snp_v,
-    output logic [31:4] snp_line,
     // Wishbone
     output logic        wb_cyc,
     output logic        wb_stb,
@@ -118,7 +115,6 @@ module tetrium_biu #(
   logic [31:0] rq_dat;
   logic        rq_h;          // 16-bit bus: half being issued
   logic [3:0]  outs;          // write beats issued, not yet acked
-  logic        yielded;       // last stream stopped for an I-cache fill
   logic        gact;          // 128-bit: fill rows still to be written
 
   // piece of the single access issued (s) / acked (a)
@@ -162,13 +158,12 @@ module tetrium_biu #(
   // stream: load the next entry when the request register is free (or being accepted)
   wire ws_beat  = ws && rq_v && !wb_stall;
   wire ws_acc   = ws_beat && (BB != 2 || rq_h || rq_sel[3:2] == 2'b00);
-  // instruction fills do not overtake stores: the store buffer drains first
-  // (a fill must see code just written; D-fills wait the same way)
-  wire ws_stop  = 1'b0;
+  // fills do not overtake stores: a stream runs until the store buffer is empty (a fill
+  // must see code just written; the job order below also puts stores before fills)
   wire [3:0] outs_n = outs + (ws_beat ? 4'd1 : 4'd0) - ((ws && wb_ack) ? 4'd1 : 4'd0);
-  wire ws_load  = ws && (!rq_v || ws_acc) && sb_v && !ws_stop && (outs_n < 4'd8);
-  wire ws_end   = ws && !rq_v && (outs == 4'd0) && (!sb_v || ws_stop);
-  wire start_ws = !busy && !io_req && !pw_req && !pw_lock && !(if_req && yielded) && sb_v;
+  wire ws_load  = ws && (!rq_v || ws_acc) && sb_v && (outs_n < 4'd8);
+  wire ws_end   = ws && !rq_v && (outs == 4'd0) && !sb_v;
+  wire start_ws = !busy && !io_req && !pw_req && !pw_lock && sb_v;
   // next job (taken when the bus is idle)
   jt_t nj;
   always_comb begin
@@ -252,8 +247,6 @@ module tetrium_biu #(
   assign wb_lock = pw_lock || lk_hold;
   assign io_done = (jt == J_IO) && lastack;
   assign sb_pop  = ws_load || start_ws;
-  assign snp_v   = ws_acc;
-  assign snp_line = rq_adr[31:4];
 
   // assembled read result (valid with *_done): the bytes from the first byte's
   // lane on; the last piece comes straight from the bus
@@ -271,7 +264,7 @@ module tetrium_biu #(
   always_ff @(posedge clk) begin
     if (rst) begin
       jt <= J_NONE; ni <= '0; na <= '0; nb <= '0; bwe <= 1'b0; btga <= 2'd0; fm <= 1'b0;
-      rq_v <= 1'b0; outs <= '0; yielded <= 1'b0; rq_h <= 1'b0;
+      rq_v <= 1'b0; outs <= '0; rq_h <= 1'b0;
     end else if (ws) begin
       outs <= outs_n;
       if (ws_load) begin
@@ -279,10 +272,7 @@ module tetrium_biu #(
         rq_h <= (sb_be[1:0] == 2'b00);
       end else if (ws_acc) rq_v <= 1'b0;
       else if (ws_beat) rq_h <= 1'b1;
-      if (ws_end) begin
-        jt <= J_NONE;
-        yielded <= ws_stop && sb_v;
-      end
+      if (ws_end) jt <= J_NONE;
     end else begin
       if (busy) begin
         if (issue) ni <= ni + 5'd1;
@@ -323,7 +313,6 @@ module tetrium_biu #(
         lo_lane <= l0[1:0];
         jt <= nj;
         ni <= '0; na <= '0;
-        if (nj == J_IF) yielded <= 1'b0;
         if (nj == J_WS) begin
           rq_v <= 1'b1; rq_adr <= sb_adr; rq_sel <= sb_be; rq_dat <= sb_dat; outs <= '0;
           rq_h <= (sb_be[1:0] == 2'b00);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 ZbuntowanyKamulec
-// Tetrium paging unit: TLB (i486 organisation), last-page registers, page walker,
+// Tetrium paging unit: TLB (i486 organisation), data micro-TLB, page walker,
 // TLB test registers TR6 / TR7
 //  * TLB: 8 sets x 4 ways (32 entries), set = linear[14:12], tag = linear[31:15],
 //    pseudo-LRU replacement (3 bits per set, an invalid way first), as on the i486.
@@ -8,22 +8,24 @@
 //    port), valid bits and LRU bits in flip-flops (CR3 write: flash clear).
 //    U / W are the combined (most restrictive) PDE and PTE bits.
 //  * read ports: D (M-stage replay), F (fetch page change), K (walker, TR6)
-//  * data micro-TLB (checked in A2 for the primary and secondary address): 8 sets x
-//    2 ways, set = linear[14:12] as the TLB's, each entry a copy of one TLB entry with
-//    its way; a TLB write to that entry, INVLPG, a CR3 write, a TR6 write or a CR0 write
-//    drops it.  (The fetch last-page register lives in tetrium_fetch.)  Hits through it
-//    touch the entry's LRU bits like a TLB lookup.
+//  * data micro-TLB (checked in A2 for the primary and secondary address): 2^UT_SB sets x
+//    UT_WAYS ways (default 16 x 1), set = linear[12 +: UT_SB], each entry a copy of one TLB
+//    entry with its way; a TLB write to that entry drops it, INVLPG, a CR3 write, a TR6
+//    write, a CR0 write or a change of A20M# all of them.  Hits through it touch the entry's LRU bits like a
+//    TLB lookup.  (The fetch micro-TLB lives in tetrium_fetch.)
 //  * walker: one request at a time (E before F): TLB lookup; if it misses, lacks the
 //    rights or a write needs D, the page tables are read and updated over the bus
 //    (uncached, locked, after the store buffer has drained), the entry is written and
 //    the checks are redone on the walked bits.  Accessed / dirty bits are written
 //    only when they change; the written word's line is invalidated in both caches.
-//  * L2 TLB (L2TLB_AB > 0): 2^L2TLB_AB entries, direct-mapped by linear[12 +: L2TLB_AB], in
-//    block RAM: {valid, tag, ppn, U, W, D, PCD, PWT} as the TLB's.  Read with the walker's
-//    TLB lookup; a hit with the rights (and D for a write) fills the TLB as a walk would
-//    (no bus access).  Filled by every successful walk.  INVLPG and TR6 writes clear the
-//    entry at that index; a CR3 write clears all of it (one entry per cycle, the L2 unused
-//    meanwhile).  TR6 / TR7 see only the TLB.
+//  * L2 TLB (L2TLB_AB > 0): 2^L2TLB_AB entries in L2TLB_WAYS ways (1, 2 or 4) of
+//    2^L2TLB_AB / L2TLB_WAYS sets (set = the low bits of linear[31:12]), one block RAM per
+//    way, all read at once: {valid, tag, ppn, U, W, D, PCD, PWT} as the TLB's.  Read with
+//    the walker's TLB lookup; a hit with the rights (and D for a write) fills the TLB as a
+//    walk would (no bus access).  Filled by every successful walk, round-robin over the ways
+//    (into the way that hit when only the rights or D were missing).  INVLPG and TR6 writes
+//    clear every way of that set; a CR3 write clears all of it (one set per cycle, the L2
+//    unused meanwhile).  TR6 / TR7 see only the TLB.
 //  * TR6 / TR7: write (C = 0) and lookup (C = 1) as in the i486 manual (10.6): a write
 //    places the entry in the way TR7.REP (TR7.PL set) or the replacement way; a lookup
 //    matches the tag, V and the attribute bit pairs and reports PA, PCD, PWT, the LRU
@@ -39,7 +41,7 @@ module tetrium_mmu (
     input  logic        flush_all,       // CR3 write (MOV, task switch)
     input  logic        invlpg_v,
     input  logic [31:12] invlpg_a,
-    input  logic        lp_kill,         // CR0 write: drop the last-page registers
+    input  logic        lp_kill,         // CR0 write: drop the micro-TLBs (fetch and data)
     // test registers
     input  logic        tr_we,           // MOV TRn, r (n = 6, 7)
     input  logic        tr_sel7,         //   TR7 (else TR6)
@@ -62,7 +64,7 @@ module tetrium_mmu (
     output logic        fl_hit,
     output logic [1:0]  fl_way,
     output logic [41:0] fl_e,
-    // LRU touches of last-page register hits: {valid, set, way} x 3 (F, primary, secondary)
+    // LRU touches of micro-TLB hits: {valid, set, way} x 3 (fetch, data primary, secondary)
     input  logic [2:0]  lt_v,
     input  logic [14:0] lt_sw,           // per touch {set[2:0], way[1:0]}
     // data micro-TLB (checked in A2): 2^UT_SB sets x UT_WAYS ways, flattened
@@ -78,10 +80,10 @@ module tetrium_mmu (
     input  logic [31:12] lp_vpn,
     input  logic [41:0] lp_e,
     input  logic [1:0]  lp_way,
-    // TLB write event (the fetch last-page register drops its entry on a match)
+    // TLB write event (the fetch micro-TLB drops its copy of that entry)
     output logic        tw_v,
     output logic [4:0]  tw_sw,           // {set, way}
-    output logic        lpf_kill,        // flush / INVLPG / TR6 write / CR0 write
+    output logic        lpf_kill,        // flush / INVLPG / TR6 write / CR0 write / A20M# change
     // walker requests: E (data) and F (code)
     input  logic        e_req,
     input  logic [31:12] e_a,
@@ -251,31 +253,54 @@ module tetrium_mmu (
   // ---------------------------------------------------------------- L2 TLB
   localparam int L2B = `L2TLB_AB;
   localparam int L2N = (L2B > 0) ? L2B : 1;
-  localparam int L2T = 20 - L2N;                       // tag bits
+  localparam int L2W = `L2TLB_WAYS;                    // ways (1, 2, 4), one RAM each, read in parallel
+  localparam int L2WB = $clog2(L2W);
+  localparam int L2WN = (L2WB > 0) ? L2WB : 1;
+  localparam int L2S = L2N - L2WB;                     // set index bits
+  localparam int L2T = 20 - L2S;                       // tag bits
   logic           l2_hit;                              // (W_LK2) the L2 holds rq_a
   logic [24:0]    l2_d;                                // {ppn, U, W, D, PCD, PWT}
   logic           l2_clr;                              // clearing (reset, CR3 write): unused
   logic           l2_nof;                              // no fill for the walk in progress
-  logic [L2N-1:0] l2_cnt;
+  logic [L2S-1:0] l2_cnt;
   generate if (L2B > 0) begin : g_l2
-    logic [L2T+25:0] rd, wd;
-    logic            we;
-    logic [L2N-1:0]  wa;
+    genvar gl;
+    logic [L2W-1:0][L2T+25:0] l2rd;
+    logic [L2T+25:0] wd;
+    logic [L2W-1:0]  we, hw;
+    logic [L2S-1:0]  wa;
+    logic [L2WN-1:0] he, hwq, rr;                      // way that hits, registered (W_LK2), round-robin victim
+    logic            hq;
     always_comb begin
-      we = 1'b0; wa = rq_a[12 +: L2N]; wd = {1'b1, rq_a[31 -: L2T], wk_e[24:0]};
-      if (l2_clr) begin we = 1'b1; wa = l2_cnt; wd = '0; end
-      else if (invlpg_v || tr6_wr) begin we = 1'b1; wa = invlpg_v ? invlpg_a[12 +: L2N] : tr_d[12 +: L2N]; wd = '0; end
-      else if (ws == W_FIN && !l2_nof) we = 1'b1;
+      he = '0;
+      for (int i = 0; i < L2W; i++) begin
+        hw[i] = l2rd[i][L2T + 25] && (l2rd[i][L2T + 24:25] == rq_a[31 -: L2T]);
+        if (hw[i]) he = i[L2WN-1:0];
+      end
     end
-    tetrium_bram #(.AW(L2N), .DW(L2T + 26)) u_l2 (
-        .clk(clk), .re(1'b1), .raddr(rq_a[12 +: L2N]), .rdata(rd), .we(we), .waddr(wa), .wdata(wd));
-    assign l2_hit = rd[L2T + 25] && (rd[L2T + 24:25] == rq_a[31 -: L2T]) && !l2_clr;
-    assign l2_d   = rd[24:0];
+    // a fill writes the way that hit (a rights / D miss) or the round-robin way; a clear, all ways
+    always_comb begin
+      we = '0; wa = rq_a[12 +: L2S]; wd = {1'b1, rq_a[31 -: L2T], wk_e[24:0]};
+      if (l2_clr) begin we = '1; wa = l2_cnt; wd = '0; end
+      else if (invlpg_v || tr6_wr) begin we = '1; wa = invlpg_v ? invlpg_a[12 +: L2S] : tr_d[12 +: L2S]; wd = '0; end
+      else if (ws == W_FIN && !l2_nof) begin
+        for (int i = 0; i < L2W; i++) we[i] = (L2W == 1) || ((hq ? hwq : rr) == i[L2WN-1:0]);
+      end
+    end
+    for (gl = 0; gl < L2W; gl++) begin : g_w
+      tetrium_bram #(.AW(L2S), .DW(L2T + 26)) u_l2 (
+          .clk(clk), .re(1'b1), .raddr(rq_a[12 +: L2S]), .rdata(l2rd[gl]), .we(we[gl]), .waddr(wa), .wdata(wd));
+    end
+    assign l2_d   = l2rd[he][24:0];
+    assign l2_hit = |hw && !l2_clr;
     always_ff @(posedge clk) begin
       if (rst || flush_all) begin l2_clr <= 1'b1; l2_cnt <= '0; end
       else if (l2_clr) begin l2_cnt <= l2_cnt + 1'b1; if (&l2_cnt) l2_clr <= 1'b0; end
       if (ws == W_IDLE) l2_nof <= 1'b0;
       else if (flush_all || invlpg_v || tr6_wr) l2_nof <= 1'b1;
+      if (ws == W_LK2) begin hq <= l2_hit; hwq <= he; end
+      if (rst) rr <= '0;
+      else if (ws == W_FIN && !l2_nof && !hq) rr <= rr + 1'b1;
     end
   end else begin : g_nol2
     assign l2_hit = 1'b0; assign l2_d = '0; assign l2_clr = 1'b0; assign l2_nof = 1'b0; assign l2_cnt = '0;
@@ -293,21 +318,26 @@ module tetrium_mmu (
       tlb_wv = tr_d[11];
     end else if (ws == W_FIN) tlb_we = 1'b1;
   end
+  // (the micro-TLBs hold masked pages: dropped when A20M# changes too)
+  logic a20_q, a20_c;
+  always_ff @(posedge clk) begin a20_q <= a20m; a20_c <= (a20m != a20_q); end
+  wire lpk = lp_kill || a20_c;
   assign tw_v     = tlb_we;
   assign tw_sw    = {tlb_ws, tlb_ww};
-  assign lpf_kill = flush_all || invlpg_v || tr6_wr || lp_kill;
+  assign lpf_kill = flush_all || invlpg_v || tr6_wr || lpk;
 
   // ---------------------------------------------------------------- data micro-TLB
-  // 2^UT_SB sets (linear[12 +: UT_SB]; 3: the TLB's set) x UT_WAYS ways, each entry a copy
+  // 2^UT_SB sets (linear[12 +: UT_SB]; 3: the TLB's set; 4: one bit more) x UT_WAYS ways, each entry a copy
   // of one TLB entry with its way.  Loaded by M replay hits and E walks (into the way
   // already holding the page, else an invalid way, else the set's replacement way); a TLB
-  // write to that entry, INVLPG, a CR3 write, a TR6 write or a CR0 write drops it.
+  // write to that entry drops it, INVLPG, a CR3 write, a TR6 write, a CR0 write or an
+  // A20M# change all of them.
   // Replacement: pseudo-LRU over the ways (hits of uops leaving M, loads).
   localparam int USB = `UT_SB, UWY = `UT_WAYS, UNS = 1 << USB, UN = UNS * UWY;
   // (the entries are kept in the flat output vectors: unpacked arrays here crashed Quartus 17
   //  synthesis, SGN 'Cannot get member name')
   logic [2:0]  ulru [UNS];
-  function automatic int uset(input logic [31:12] a); return (USB == 0) ? 0 : (int'(a[14:12]) & (UNS - 1)); endfunction
+  function automatic int uset(input logic [31:12] a); return (USB == 0) ? 0 : (int'(a[15:12]) & (UNS - 1)); endfunction
   function automatic logic [1:0] uvict(input logic [2:0] b);
     return (UWY == 1) ? 2'd0 : (UWY == 2) ? {1'b0, b[0]} : (b[0] ? {1'b1, b[2]} : {1'b0, b[1]});
   endfunction
@@ -321,7 +351,7 @@ module tetrium_mmu (
   logic [41:0] ld_e;
   logic [1:0]  ld_way;
   always_ff @(posedge clk) begin
-    ld_q <= (lpp_ld || lps_ld) && !(rst || flush_all || invlpg_v || tr6_wr || lp_kill) &&
+    ld_q <= (lpp_ld || lps_ld) && !(rst || flush_all || invlpg_v || tr6_wr || lpk) &&
             !(tlb_we && tlb_ws == lp_vpn[14:12] && tlb_ww == lp_way);
     ld_vpn <= lp_vpn; ld_e <= lp_e; ld_way <= lp_way;
   end
@@ -341,7 +371,7 @@ module tetrium_mmu (
     for (int q = 0; q < UN; q++) ld_sel[q] = ((q / UWY) == ld_s) && ((q % UWY) == int'(ld_w));
   end
   always_ff @(posedge clk) begin
-    if (rst || flush_all || invlpg_v || tr6_wr || lp_kill) begin
+    if (rst || flush_all || invlpg_v || tr6_wr || lpk) begin
       for (int i = 0; i < UN; i++) ut_v[i] <= 1'b0;
     end else begin
       for (int i = 0; i < UN; i++)
@@ -365,7 +395,7 @@ module tetrium_mmu (
   end
 `endif
   // ---------------------------------------------------------------- state
-  // LRU touches of the last-page hits and the D / F lookups: applied one cycle later
+  // LRU touches of the micro-TLB hits and the D / F lookups: applied one cycle later
   // (they come from the pipeline stall / hit paths)
   logic [4:0]  tq_v;
   logic [24:0] tq_sw;          // {F, D, lt2, lt1, lt0} x {set, way}
@@ -379,9 +409,9 @@ module tetrium_mmu (
       ws <= W_IDLE;
       tr6_q <= '0; tr7_q <= '0;
     end else begin
-      // LRU: last-page hits, D / F lookups used, walker hits and fills, TR6 operations.
+      // LRU: micro-TLB hits, D / F lookups used, walker hits and fills, TR6 operations.
       // One touch per cycle, the highest of: TR6 > TLB write > walker hit > F > D > the
-      // last-page hits (several in a cycle only with paging on, where the LRU order is an
+      // micro-TLB hits (several in a cycle only with paging on, where the LRU order is an
       // approximation of the i486's per-access lookups anyway; TR6 / TR7 tests see one)
       begin
         logic [7:0] sv; logic [2:0] ss [8]; logic [1:0] sw [8];

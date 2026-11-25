@@ -2,12 +2,13 @@
 // Copyright (C) 2026 ZbuntowanyKamulec
 // Tetrium core: pipelined i486-class CPU (no FPU)
 //   F (fetch, I$, BTB) -> D1 (queue, prefixes, lengths) -> D2 (decode, ucode ROM)
-//   -> A1 (EA, A-regs) -> A2 (linear address, limits) -> M (TLB, D$ read) -> E (execute)
-//   -> W (D$ write, store buffer)
+//   -> A1 (EA, A-regs) -> A2 (linear address, limits, micro-TLB) -> M (D$ read, TLB replay)
+//   -> E (execute) -> W (D$ write, store buffer)
 `include "tetrium_cfg.svh"
 import tetrium_pkg::*;
 module tetrium_core #(
-    // memory types per 16 KB region below 1 MB (index = address[19:14]; above: cached):
+    // memory types per 16 KB region below 1 MB (index = address[19:14]; above: the MT_*
+    // ranges, else cached):
     //   cached (write-through L1) / write-combining (uncached reads, merged
     //   writes: video RAM) / strongly uncached (neither bit set: MMIO)
     parameter logic [63:0] CACHEABLE = 64'hFFFF_00FF_FFFF_FFFF,
@@ -20,10 +21,9 @@ module tetrium_core #(
     parameter logic [7:0]  MT_TYPE = '0,
     // Wishbone data width: 16, 32, 64 or 128 (line fills use the full width)
     parameter int BUS_DW = `BUS_DW,
-    // identification (reset EDX, CPUID) and debug registers, see tetrium_cfg.svh
+    // identification (reset EDX, CPUID), see tetrium_cfg.svh
     parameter logic [31:0] CPU_SIG    = `CPU_SIG,
-    parameter bit          HAS_CPUID  = `HAS_CPUID,
-    parameter bit          DEBUG_REGS = `DEBUG_REGS
+    parameter bit          HAS_CPUID  = `HAS_CPUID
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -42,7 +42,7 @@ module tetrium_core #(
     output logic [BUS_DW/8-1:0]        wb_sel,
     output logic [BUS_DW-1:0]          wb_dato,
     output logic [1:0]  wb_tga,      // 0 mem, 1 io, 2 inta
-    output logic        wb_lock,     // locked cycles (page-table updates)
+    output logic        wb_lock,     // locked cycles (page-table updates, LOCK / XCHG read-modify-write)
     input  logic [BUS_DW-1:0]          wb_dati,
     input  logic        wb_ack,
     input  logic        wb_stall,
@@ -79,6 +79,7 @@ module tetrium_core #(
     // testbench lockstep: instruction class of 'retire', stores leaving W in program order
     output logic        dbg_ret_inj,
     output logic        dbg_ret_dbt,         // the retired instruction is followed by a debug trap
+    output logic        dbg_nmi_ack,         // an NMI is taken
     output logic [31:0] dbg_dr6,
     output logic [31:0] dbg_dr7,
     output logic        dbg_st_v,
@@ -104,9 +105,9 @@ module tetrium_core #(
   logic [31:0] f_rasip;
   logic [1:0] be_kind, ba_kind, t_kind;
   logic       be_ind, be_tcw;
-  logic be_pt, ba_pt, t_pt, be_inval;
+  logic be_inval;
   // branch predictor snapshot ids
-  logic [3:0] q_bid, c_bid, m_bid, ba_bid, be_bid, d_bid, d_tbid, t_bid, f_bid;
+  logic [3:0] q_bid, c_bid, m_bid, ba_bid, be_bid, d_bid, d_tbid, t_bid;
   logic rd_br, rd_tk, f_br, f_tk;
   logic [1:0] f_src;                   // redirect source for the predictor snapshot: 0 E, 1 A, 2 D
   logic rd_rpush, rd_rpop, ra_rpush;
@@ -114,7 +115,6 @@ module tetrium_core #(
   logic [31:0] f_rcs;
   logic [31:0] f_rip;
   logic d_flush, d_keep, d_kill, d_inject;
-  logic [31:0] d_fip;
   // decode -> agu
   logic a_valid, a_vld_eff, a_last, a_repkill, hold_a, a2_valid;
   logic [AF_BITS-1:0] a_af;
@@ -126,21 +126,17 @@ module tetrium_core #(
   logic       m_xs;
   logic [$clog2(`DC_KB * 1024 / `DC_WAYS) - $clog2(`LINE_B) - 2:0] m_tset0, m_tset1;   // D-cache tag sets per line-parity bank
   logic m_as32;
-  logic [31:0] e_t0, e_idtb, e_gdtb, e_ldtb, e_trb;
-  logic        e_byp_t0, m_ldt0, rd_ecv;
-  logic [15:0] rd_errc;
+  logic [31:0] e_t0, e_idtb, e_gdtb, e_ldtb, e_trb, e_trl;
+  logic        e_byp_t0, e_byp_ok, m_ldt0;
   logic [31:0] c_disp, c_imm;
-  logic [31:0] c_ip_start, c_ip_op, c_ptgt;
-  logic [3:0] c_len;
+  logic [31:0] c_ip_start, c_ptgt;
   logic [31:0] c_ip_nx;
-  logic [31:3] q_ip;
+  logic [31:0] q_ip;
   logic d_qempty;
-  logic c_sovr_v, c_dss, c_pt, c_inj;
+  logic c_pt, c_inj;
   logic [5:0] c_srdm;
-  logic [2:0] c_sovr, c_sreg;
-  logic [1:0] c_rep, c_eas;
-  logic [7:0] c_eab;
-  logic [8:0] c_eai;
+  logic [2:0] c_sreg;
+  logic [1:0] c_rep;
   logic d_redir;
   logic [31:0] d_redir_ip;
   logic [31:0] d_btb_lin;
@@ -169,7 +165,6 @@ module tetrium_core #(
   logic [31:0] ce_rip;
   logic ra_v, ba_we, ba_taken, ba_inval;
   logic [31:0] ra_cs;
-  logic [15:0] a_sp_dbg;
   logic [31:0] ra_ip, ba_tgt;
   logic [31:0] ba_lin;
   // mem
@@ -190,7 +185,7 @@ module tetrium_core #(
   logic [95:0] e_seg;
   logic e_df;
   logic [31:0] e_flags;
-  logic e_pm, e_vm, e_csd, e_iochk, e_pgq;
+  logic e_pm, e_csd, e_iochk, e_pgq;
   logic [1:0] e_cpl;
   logic [31:0] e_cr0;
   logic [31:0] e_ip;
@@ -213,8 +208,8 @@ module tetrium_core #(
   logic [31:0] w_data;
   logic flush_r, rd_fetch, rd_inject, rd_stop;
   logic [31:0] rd_cs;
-  logic [31:0] rd_ip, rd_ret;
-  logic [7:0] rd_vec, rd_op;
+  logic [31:0] rd_ip;
+  logic [7:0] rd_op;
   logic [4:0] rd_injid;
   logic [31:0] rd_imm, rd_ips, rd_ipn;
   logic rd_os32, rd_int, rd_ecvx, c_ecv, e_tss32, e_ldtw;
@@ -245,10 +240,7 @@ module tetrium_core #(
   logic [1:0] f_row, f_hm;
   logic [63:0] f_data;
   logic [31:0] rdata32;
-  logic bsnp_v;
-  logic smc_hit, snp_hit, smc_busy, smc_hold;
-  logic [31:4] bsnp_line;
-  logic busy_init;
+  logic smc_hit, snp_hit, smc_hold;
 
   // ---------------------------------------------------------------- paging (tetrium_mmu)
   wire         pgon = e_cr0[31] && e_cr0[0];
@@ -346,33 +338,32 @@ module tetrium_core #(
   always_comb begin
     f_redir = 1'b0; f_nopred = 1'b0; f_stop = 1'b0; f_rcs = rd_cs; f_rip = rd_ip;
     f_rpush = 1'b0; f_rpop = 1'b0; f_rasip = rd_rip;
-    f_bid = be_bid; f_br = 1'b0; f_tk = 1'b0; f_src = 2'd0;
-    d_flush = 1'b0; d_keep = 1'b0; d_kill = 1'b0; d_inject = 1'b0; d_fip = rd_ip;
+    f_br = 1'b0; f_tk = 1'b0; f_src = 2'd0;
+    d_flush = 1'b0; d_keep = 1'b0; d_kill = 1'b0; d_inject = 1'b0;
     if (boot) begin
       f_redir = 1'b1; f_rcs = init_csbase; f_rip = init_ip;
-      d_flush = 1'b1; d_kill = 1'b1; d_fip = init_ip;
+      d_flush = 1'b1; d_kill = 1'b1;
     end else if (flush_r) begin
       f_redir = rd_fetch; f_stop = rd_stop;
       f_rpush = rd_fetch && rd_rpush; f_rpop = rd_fetch && rd_rpop;
       f_br = rd_br; f_tk = rd_tk;
       d_flush = 1'b1; d_kill = 1'b1; d_inject = rd_inject;
-      d_fip = rd_ip;
     end else if (ra_v) begin
       f_redir = 1'b1; f_rcs = ra_cs; f_rip = ra_ip;
       f_rpush = ra_rpush; f_rasip = ra_rip;
-      f_bid = ba_bid; f_br = !ba_inval; f_tk = ba_taken; f_src = 2'd1;
-      d_flush = 1'b1; d_kill = 1'b1; d_fip = ra_ip;
+      f_br = !ba_inval; f_tk = ba_taken; f_src = 2'd1;
+      d_flush = 1'b1; d_kill = 1'b1;
     end else if (d_redir) begin
       f_redir = 1'b1; f_rcs = rm_f ? {12'h0, csr_sel, 4'h0} : f_cs; f_rip = d_redir_ip; f_nopred = 1'b1;
-      f_bid = d_bid; f_src = 2'd2;
-      d_flush = 1'b1; d_keep = 1'b1; d_fip = d_redir_ip;
+      f_src = 2'd2;
+      d_flush = 1'b1; d_keep = 1'b1;
     end
   end
 
   // BTB training arbitration: E first; an A training that loses the write port
   // waits in a one-entry buffer (else a CALL trained in A right behind a RET
   // trained in E would never enter the BTB)
-  logic        pa_v, pa_taken, pa_inval, pa_pt;
+  logic        pa_v, pa_taken, pa_inval;
   logic [31:0] pa_lin, pa_tgt;
   logic [1:0]  pa_kind;
   logic [3:0]  pa_bid;
@@ -382,7 +373,7 @@ module tetrium_core #(
     else if (!be_we) pa_v <= 1'b0;
     if (ba_we && (be_we || pa_v)) begin
       pa_taken <= ba_taken; pa_inval <= ba_inval; pa_lin <= ba_lin; pa_tgt <= ba_tgt;
-      pa_kind <= ba_kind; pa_pt <= ba_pt; pa_bid <= ba_bid;
+      pa_kind <= ba_kind; pa_bid <= ba_bid;
     end
   end
   logic        t_we, t_taken, t_inval;
@@ -390,15 +381,15 @@ module tetrium_core #(
   logic [31:0] t_tgt;
   always_comb begin
     t_we = 1'b0; t_taken = be_taken; t_lin = be_lin; t_tgt = be_tgt; t_kind = be_kind;
-    t_pt = be_pt; t_bid = be_bid; t_inval = be_inval;
+    t_bid = be_bid; t_inval = be_inval;
     if (be_we) begin
       t_we = 1'b1;
     end else if (pa_v) begin
       t_we = 1'b1; t_taken = pa_taken; t_inval = pa_inval; t_lin = pa_lin; t_tgt = pa_tgt; t_kind = pa_kind;
-      t_pt = pa_pt; t_bid = pa_bid;
+      t_bid = pa_bid;
     end else if (ba_we) begin
       t_we = 1'b1; t_taken = ba_taken; t_inval = ba_inval; t_lin = ba_lin; t_tgt = ba_tgt; t_kind = ba_kind;
-      t_pt = ba_pt; t_bid = ba_bid;
+      t_bid = ba_bid;
     end else if (d_redir) begin
       t_we = 1'b1; t_inval = 1'b1; t_lin = d_btb_lin; t_kind = 2'd0; t_bid = d_tbid;
     end
@@ -418,17 +409,17 @@ module tetrium_core #(
       .rid_e(be_bid), .rid_a(ba_bid), .rid_d(d_bid), .redir_src(f_src), .ce_push, .ce_pop, .ce_rip,
       .rlin_e(be_lin[2:0]), .rlin_a(ba_lin[2:0]), .redir_br(f_br), .redir_tk(f_tk),
       .q_full, .q_push, .q_data, .q_pd, .q_s, .q_e, .q_pt, .q_ptgt, .q_lin, .q_ip, .q_bid,
-      .btb_bid(t_bid), .btb_we(t_we), .btb_lin(t_lin), .btb_taken(t_taken), .btb_inval(t_inval), .btb_tgt(t_tgt), .btb_kind(t_kind), .btb_pt(t_pt), .btb_ind(be_we && be_ind), .btb_tcw(be_we && be_tcw),
+      .btb_bid(t_bid), .btb_we(t_we), .btb_lin(t_lin), .btb_taken(t_taken), .btb_inval(t_inval), .btb_tgt(t_tgt), .btb_kind(t_kind), .btb_ind(be_we && be_ind), .btb_tcw(be_we && be_tcw),
       .fill_req(if_req), .fill_line(if_line), .fill_we(if_we), .fill_row(f_row), .fill_hm(f_hm),
       .fill_data(f_data), .fill_done(if_done),
       .snp_v(isn_v), .snp_line(isn_l),
       .wsn_v(w_v && !hold_w), .wsn_l0(w_lin[31:3]), .wsn_l1(w_l1),
       .est_v(e_st_v), .est_l0(e_st_lin[31:3]), .est_l1(e_l1), .hold_w,
-      .smc_hit, .snp_hit, .smc_busy, .smc_hold,
+      .smc_hit, .snp_hit, .smc_hold,
       .pg(pg_f), .cpl3(cpl3_f), .fl_a, .fl_touch, .fl_hit, .fl_way, .fl_e, .lpf_kill, .tw_v, .tw_sw,
       .lt_v(f_lt_v), .lt_sw(f_lt_sw), .fe_drained, .f_req(f_preq), .f_acc(f_pacc), .f_done(f_pdone),
       .w_ok, .w_err, .w_e, .w_way, .ff_flt, .ff_err, .ff_lin,
-      .busy_init, .inv_all, .inv_busy(ic_ibusy), .cs_o(f_cs));
+      .inv_all, .inv_busy(ic_ibusy), .cs_o(f_cs));
 
   tetrium_decode u_dec (
       .clk, .rst, .cs_d(e_csd), .pm(e_pm), .iochk(e_iochk),
@@ -437,29 +428,29 @@ module tetrium_core #(
       .inject(d_inject), .inject_id(rd_injid), .inject_imm(rd_imm), .inject_ips(rd_ips), .inject_ipn(rd_ipn),
       .inject_os32(rd_os32), .inject_op(rd_op), .inject_int(rd_int), .inject_ecv(rd_ecvx), .inject_cnt(rd_cnt), .c_ecv,
       .hold_a, .a_repkill, .a_valid, .a_vld_eff, .a_last, .a_af, .a_sel, .a_uw,
-      .c_op, .c_pg, .c_modrm, .c_disp, .c_imm_o(c_imm), .c_ip_start, .c_ip_op, .c_len, .c_ip_nx, .c_sovr_v, .c_sovr, .c_rep,
-      .c_os32, .c_as32, .c_lock, .c_ud, .c_eab, .c_eai, .c_eas, .c_dss, .c_sreg, .c_pt, .c_ptgt, .c_bid, .c_inj, .c_srdm,
+      .c_op, .c_pg, .c_modrm, .c_disp, .c_imm_o(c_imm), .c_ip_start, .c_ip_nx, .c_rep,
+      .c_os32, .c_as32, .c_lock, .c_ud, .c_sreg, .c_pt, .c_ptgt, .c_bid, .c_inj, .c_srdm,
       .d_redir, .d_redir_ip, .d_btb_lin, .d_bid, .d_tbid, .q_empty(d_qempty), .d_starve);
 
   tetrium_agu u_agu (
       .clk, .rst,
       .a_vld_eff, .a_last, .a_af, .a_sel, .a_uw,
-      .c_op, .c_pg, .c_modrm, .c_disp, .c_imm, .c_ip_start, .c_ip_op, .c_len, .c_ip_nx, .c_rep,
+      .c_op, .c_pg, .c_modrm, .c_disp, .c_imm, .c_ip_start, .c_ip_nx, .c_rep,
       .c_os32, .c_as32, .c_lock, .c_ud, .c_sreg, .c_pt, .c_ptgt, .c_bid, .c_inj, .c_srdm,
-      .a_repkill, .hold_m, .hold_a, .a20m, .init_seg, .init_csbase, .flush_e(flush_r || rst), .e_gpr, .e_df, .e_pm, .e_t0, .e_byp_t0, .e_idtb, .e_gdtb, .e_ldtb, .e_trb, .e_tss32, .c_ecv, .a_ssbase, .a_sacc, .e_ldtw,
+      .a_repkill, .hold_m, .hold_a, .a20m, .init_seg, .init_csbase, .flush_e(flush_r || rst), .e_gpr, .e_df, .e_pm, .e_t0, .e_byp_t0, .e_idtb, .e_gdtb, .e_ldtb, .e_trb, .e_trl, .e_tss32, .c_ecv, .a_ssbase, .a_sacc, .e_ldtw,
       .ewh0, .ewh1, .ewv0, .ewv1,
       .esw_en, .esw_r, .esw_k, .esw_base, .esw_lim, .esw_acc, .esw_db, .esw_nul, .edf_en, .edf_v, .ss_snap, .ss_rest,
       .m_dmask_in(m_valid ? m_dmask : 16'd0), .e_dmask_in(e_dmask),
-      .e_dm_e, .e_byp_m, .e_byp_32, .e_byp_d, .m_ldm, .m_ld32, .m_ldt0, .a2_valid,
+      .e_dm_e, .e_byp_m, .e_byp_ok, .e_byp_32, .e_byp_d, .m_ldm, .m_ld32, .m_ldt0, .a2_valid,
       .ac_row, .ac_row1,
       .m_valid, .m_uw, .m_last, .m_bnd, .m_w, .m_sz, .m_msz, .m_op, .m_pg, .m_modrm, .m_imm, .m_disp, .m_ip_start,
       .m_ip_next, .m_sreg, .m_rep, .m_os32, .m_as32, .m_lock, .m_pt, .m_ptgt, .m_bid, .m_inj, .m_abr, .m_lin, .m_lin4, .m_tset0, .m_tset1, .m_off,
       .m_slin, .m_slin4, .m_spw, .m_spv, .m_siw, .m_siv, .m_diw, .m_div, .m_cxw, .m_cxv,
       .m_tgt, .m_tbad, .m_brlin, .m_cxnz, .m_ataken, .m_aex, .m_dmask, .m_amis, .m_xc, .m_xs,
       .pg(e_pgq), .wp(e_cr0[16]), .e_cpl, .ut_v, .ut_e, .ut_lo, .ut_w, .ut_tv, .ut_tsw,
-      .dl_a, .dl_hit, .dl_way, .dl_e, .dl_user, .dl_wr, .dl_okp, .dl_okw, .m_rp, .x_act, .mlp_p_ld, .mlp_s_ld, .mlp_vpn, .lt_v(a_lt_v), .lt_sw(a_lt_sw),
+      .dl_a, .dl_hit, .dl_e, .dl_user, .dl_wr, .dl_okp, .dl_okw, .m_rp, .x_act, .mlp_p_ld, .mlp_s_ld, .mlp_vpn, .lt_v(a_lt_v), .lt_sw(a_lt_sw),
       .m_pppn, .m_pok, .m_ppcd, .m_sppn, .m_sok, .m_ucpl, .e_gdtl, .e_idtl, .e_ldtl, .m_noacc,
-      .ra_v, .ra_csb(ra_cs), .ra_ip, .ba_we, .ba_lin, .ba_taken, .ba_inval, .ba_tgt, .ba_kind, .ba_pt, .ba_bid, .ra_rpush, .ra_rip, .a_sp_dbg,
+      .ra_v, .ra_csb(ra_cs), .ra_ip, .ba_we, .ba_lin, .ba_taken, .ba_inval, .ba_tgt, .ba_kind, .ba_bid, .ra_rpush, .ra_rip,
       .dbg_sbase, .dbg_slim, .dbg_sattr);
 
   tetrium_mem #(.CACHEABLE(CACHEABLE), .WCOMB(WCOMB), .MT_N(MT_N), .MT_BASE(MT_BASE), .MT_MASK(MT_MASK), .MT_TYPE(MT_TYPE)) u_mem (
@@ -477,10 +468,10 @@ module tetrium_core #(
       .inv_all, .inv_busy(dc_ibusy), .snp_v(dsn_v), .snp_line(dsn_l),
       .m_data, .m_ldwait, .m_fwd);
 
-  tetrium_exec #(.HAS_CPUID(HAS_CPUID), .CPU_SIG(CPU_SIG), .DEBUG_REGS(DEBUG_REGS)) u_exec (
+  tetrium_exec #(.HAS_CPUID(HAS_CPUID), .CPU_SIG(CPU_SIG)) u_exec (
       .clk, .rst,
       .init_gpr, .init_seg, .init_csbase, .init_cr0, .init_ip, .init_flags,
-      .m_adv, .m_uw, .m_last, .m_bnd, .m_w, .m_sz, .m_msz, .m_op, .m_pg, .m_modrm, .m_imm, .m_disp, .m_ip_start,
+      .m_adv, .m_valid, .m_uw, .m_last, .m_bnd, .m_w, .m_sz, .m_msz, .m_op, .m_pg, .m_modrm, .m_imm, .m_disp, .m_ip_start,
       .m_ip_next, .m_sreg, .m_rep, .m_as32, .m_os32, .m_pt, .m_ptgt, .m_bid, .m_inj, .m_abr, .m_off,
       .m_spw, .m_spv, .m_siw, .m_siv, .m_diw, .m_div, .m_cxw, .m_cxv,
       .m_tgt, .m_tbad, .m_brlin, .m_cxnz, .m_ataken, .m_aex, .m_dmask, .m_ldm, .m_ld32, .m_ldt0, .m_amis, .m_xc, .m_xs, .m_data, .m_ldwait, .m_fwd,
@@ -491,18 +482,18 @@ module tetrium_core #(
       .ff_go, .ff_err, .ff_lin, .m_lock, .lk_hold, .e_gdtl, .e_idtl, .e_ldtl, .m_noacc,
       .x_act, .x_lin, .x_lin4, .x_sz, .x_data, .x_hit, .x_hb, .x_cached, .x_fill, .x_fill_done,
       .du_req, .du_done, .du_data(rdata32), .l_st_v,
-      .hold_e, .hold_w, .io_ok, .e_cinv, .e_cwb, .c_busy(dc_ibusy || ic_ibusy), .smc_hit, .snp_hit, .smc_busy, .e_busy_valid(e_valid), .e_dmask, .ce_push, .ce_pop, .ce_rip, .e_dm_e, .e_byp_m, .e_byp_32, .e_byp_d, .e_st_v, .e_st_a0, .e_st_a1, .e_st_be0, .e_st_be1,
-      .e_gpr, .e_seg, .e_df, .e_t0, .e_byp_t0, .e_idtb, .e_gdtb, .e_ldtb, .e_trb, .e_tss32, .e_ldtw, .a_ssbase, .a_sacc, .e_flags, .e_ip, .e_pm, .e_vm, .e_cpl, .e_csd, .e_iochk, .e_pgq, .e_cr0, .e_sysdbg(dbg_sys),
+      .hold_e, .hold_w, .io_ok, .e_cinv, .e_cwb, .c_busy(dc_ibusy || ic_ibusy), .smc_hit, .snp_hit, .e_busy_valid(e_valid), .e_dmask, .ce_push, .ce_pop, .ce_rip, .e_dm_e, .e_byp_m, .e_byp_ok, .e_byp_32, .e_byp_d, .e_st_v, .e_st_a0, .e_st_a1, .e_st_be0, .e_st_be1,
+      .e_gpr, .e_seg, .e_df, .e_t0, .e_byp_t0, .e_idtb, .e_gdtb, .e_ldtb, .e_trb, .e_trl, .e_tss32, .e_ldtw, .a_ssbase, .a_sacc, .e_flags, .e_ip, .e_pm, .e_cpl, .e_csd, .e_iochk, .e_pgq, .e_cr0, .e_sysdbg(dbg_sys),
       .ewh0, .ewh1, .ewv0, .ewv1,
       .esw_en, .esw_r, .esw_k, .esw_base, .esw_lim, .esw_acc, .esw_db, .esw_nul, .edf_en, .edf_v, .ss_snap, .ss_rest,
       .e_st_lin, .e_st_lin4, .e_st_hlo, .e_st_hhi, .e_st_wlo, .e_st_whi, .w_hlo, .w_hhi, .w_wlo, .w_whi,
       .w_v, .w_lin, .w_lin4, .w_sz, .w_data, .w_two, .w_nowr, .w_d0, .w_d1,
-      .flush_r, .rd_fetch, .rd_csb(rd_cs), .rd_ip, .rd_inject, .rd_vec, .rd_injid, .rd_imm, .rd_ips, .rd_ipn, .rd_os32, .rd_op, .rd_int, .rd_ecvx, .rd_cnt,
-      .rd_ecv, .rd_errc, .rd_ret, .rd_stop,
-      .be_we, .be_lin, .be_taken, .be_tgt, .be_kind, .be_ind, .be_tcw, .be_pt, .be_inval, .be_bid, .rd_br, .rd_tk,
+      .flush_r, .rd_fetch, .rd_csb(rd_cs), .rd_ip, .rd_inject, .rd_injid, .rd_imm, .rd_ips, .rd_ipn, .rd_os32, .rd_op, .rd_int, .rd_ecvx, .rd_cnt,
+      .rd_stop,
+      .be_we, .be_lin, .be_taken, .be_tgt, .be_kind, .be_ind, .be_tcw, .be_inval, .be_bid, .rd_br, .rd_tk,
       .rd_rpush, .rd_rpop, .rd_rip,
       .io_req, .io_we, .io_inta, .io_port, .io_sz, .io_wdata, .io_done, .io_rdata(rdata32),
-      .intr, .nmi, .sstep, .stop_req, .halted, .shutdown, .retire, .retire_inj(dbg_ret_inj), .retire_dbt(dbg_ret_dbt), .dbg_dr6, .dbg_dr7);
+      .intr, .nmi, .sstep, .stop_req, .halted, .shutdown, .retire, .retire_inj(dbg_ret_inj), .retire_dbt(dbg_ret_dbt), .nmi_ack(dbg_nmi_ack), .dbg_dr6, .dbg_dr7);
 
   tetrium_wb #(.CACHEABLE(CACHEABLE), .WCOMB(WCOMB), .MT_N(MT_N), .MT_BASE(MT_BASE), .MT_MASK(MT_MASK), .MT_TYPE(MT_TYPE)) u_wb (
       .clk, .rst,
@@ -520,7 +511,6 @@ module tetrium_core #(
       .du_req, .du_lin(x_lin), .du_lin4(x_lin4), .du_sz(x_sz), .du_done,
       .pw_req, .pw_we, .pw_lock, .pw_adr, .pw_wdat, .pw_done, .lk_hold, .wb_lock,
       .io_req, .io_we, .io_inta, .io_port, .io_sz, .io_wdata, .io_done, .rdata32,
-      .snp_v(bsnp_v), .snp_line(bsnp_line),
       .wb_cyc, .wb_stb, .wb_we, .wb_adr, .wb_sel, .wb_dato, .wb_tga, .wb_dati, .wb_ack, .wb_stall);
 
   assign dbg_pw_v    = pw_done && pw_we;

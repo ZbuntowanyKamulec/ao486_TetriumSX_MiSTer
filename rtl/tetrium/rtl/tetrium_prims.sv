@@ -4,8 +4,9 @@
 // block RAM / distributed RAM from them without vendor primitives.
 
 // Simple dual-port block RAM: one synchronous read port with enable and one
-// write port. Read-during-write to the same address returns OLD data
-// (the core relies on that and handles the hazard itself).
+// write port. Read-during-write to the same address: the read data is not
+// defined (Quartus: no_rw_check); the users handle that hazard themselves
+// (e.g. the D-cache forwards the stores being written).
 module tetrium_bram #(
     parameter int AW = 10,
     parameter int DW = 8,

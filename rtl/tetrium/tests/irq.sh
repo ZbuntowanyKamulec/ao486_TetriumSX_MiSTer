@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 ZbuntowanyKamulec
 # interrupt regression: bench/irq.com with INTR every N cycles at several bus latencies.
-# (N must exceed the ISR length, ~30 cycles; below that the CPU livelocks in the ISR, as an 8086 would)
+# (N must exceed the ISR length, ~30 cycles; below that the CPU livelocks in the ISR, as any x86 would)
 cd "$(dirname "$0")/.."
 SIM=${SIM:-build/sim/Vtetrium_core}
 fail=0; n=0

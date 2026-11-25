@@ -3,8 +3,9 @@
 // A-stage operand selects, decoded one cycle early (in D) and registered.
 //   bsel  base register, one-hot by GPR index (AX CX DX BX SP BP SI DI)
 //   isel  index: GPR one-hot [7:0], AL [8] (XLAT)
-//   dsel  displacement (one-hot OR): disp, disp + operand size, vec, vec2, imm, ~imm, +1, -1,
-//         aoff, {imm[15:3], aoff[2:0]} (descriptor of an immediate selector),
+//   dsel  displacement (one-hot OR): disp, disp + operand size (EA2; 0F 01: + 2; registered,
+//         so not valid in an instruction's first uop), vec, vec2, imm, ~imm, +1, -1, aoff,
+//         {imm[15:3], aoff[2:0]} (descriptor of an immediate selector),
 //         {imm[7:0], aoff[2:0]} (IDT gate)
 //   ssel  segment ES CS SS DS FS GS, descriptor table (GDT / LDT by the selector's TI),
 //         IDT, TSS (none = 0: linear, A-executed ops)

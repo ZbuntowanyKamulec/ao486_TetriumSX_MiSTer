@@ -1,7 +1,7 @@
 # ao486 TetriumSX for MiSTer
 
 ao486 with its CPU replaced by [Tetrium](https://github.com/ZbuntowanyKamulec/Tetrium): about
-1.8-3x as fast as regular ao486 in most programs. Integer only (no FPU), like a 486SX. Everything
+1.9-3x as fast as regular ao486 in most programs. Integer only (no FPU), like a 486SX. Everything
 else (BIOS, VGA, sound, disks, OSD) is ao486's, and the ao486 README below still applies.
 
 ## Installation
@@ -25,7 +25,7 @@ For games that need a slower PC than 8.7 MHz, or L1 cache off, use regular ao486
 
 `ao486_TetriumSX_OC` runs the CPU at 82 MHz instead of 69 MHz (CPU Clock: 82, 41, 20 or 10 MHz).
 It is about 18% faster than the 69 MHz build. It does not meet Quartus timing at 82 MHz, so it
-may be unstable on some boards; it passed a 3-hour hwstress run on one. If something crashes or hangs, try the 69 MHz build before reporting it.
+may be unstable on some boards. If something crashes or hangs, try the 69 MHz build before reporting it.
 
 ## Performance
 
@@ -33,23 +33,23 @@ Regular ao486 (90 MHz) and TetriumSX (69 MHz) on the same MiSTer.
 
 | Program | ao486 | TetriumSX | Perf gain |
 |---|---|---|---|
-| Duke Nukem 3D, 320×200, default settings | 16 FPS | 28 FPS | 1.75× |
-| Doom 1.9, `-timedemo demo3`, high detail, full screen | 20.92 FPS | 37.49 FPS | 1.8× |
-| 3DBench 1.0c | 43.6 FPS | 100.1 FPS | 2.3× |
+| Duke Nukem 3D, 320×200, default settings | 16 FPS | 30 FPS | 1.9× |
+| Doom 1.9, `-timedemo demo3`, high detail, full screen | 20.92 FPS | 40.66 FPS | 1.9× |
+| 3DBench 1.0c | 43.6 FPS | 100.2 FPS | 2.3× |
 | CPU-Z 1.04 Vintage Edition, Windows 98 SE | ~34 | ~101 | 3× |
 | System Information (Norton Utilities), CPU speed index | 69 | 299 | 4.3× |
 
 <table>
 <tr>
-<td><img src="doc/benchmarks/doom.png" width="360"><br>Doom 1.9, demo3: 37.49 FPS</td>
+<td><img src="doc/benchmarks/doom.png" width="360"><br>Doom 1.9, demo3: 40.66 FPS</td>
 <td><img src="doc/benchmarks/sysinfo.png" width="360"><br>System Information: 299 (69 MHz build; it estimates the clock from a timing loop, hence "82 MHz")</td>
 </tr>
 <tr>
-<td><img src="doc/benchmarks/pcpbench.png" width="360"><br>PC Player Benchmark, VGA: 16.3 FPS</td>
-<td><img src="doc/benchmarks/3dbench.png" width="360"><br>3DBench 1.0c: 100.1 FPS</td>
+<td><img src="doc/benchmarks/pcpbench.png" width="360"><br>PC Player Benchmark, VGA: 16.5 FPS</td>
+<td><img src="doc/benchmarks/3dbench.png" width="360"><br>3DBench 1.0c: 100.2 FPS</td>
 </tr>
 <tr>
-<td><img src="doc/benchmarks/duke3d.png" width="360"><br>Duke Nukem 3D: ~28 FPS</td>
+<td><img src="doc/benchmarks/duke3d.png" width="360"><br>Duke Nukem 3D: ~30 FPS</td>
 <td></td>
 </tr>
 </table>
@@ -75,17 +75,17 @@ Build with Quartus 17.0, see "Building core" below.
 
 ## FPGA resources
 
-69 MHz build (DE10-Nano, Cyclone V 5CSEBA6, Quartus 17.0, seed 1). All clocks meet timing; worst
-setup slack +0.350 ns on the 69 MHz system clock.
+69 MHz build (DE10-Nano, Cyclone V 5CSEBA6, Quartus 17.0, seed 3). Worst setup slack +0.407 ns
+on the 69 MHz system clock.
 
 | | Whole core | Tetrium CPU |
 |---|---|---|
-| Logic (ALMs) | 37,068 / 41,910 (88%) | 18,544 |
-| Registers | 37,894 | 13,234 |
+| Logic (ALMs) | 37,595 / 41,910 (90%) | 19,182 |
+| Registers | 38,436 | 13,788 |
 | RAM blocks (M10K) | 553 / 553 (100%) | 135 |
 | DSP blocks | 41 / 112 (37%) | 3 |
 
-The CPU column includes its caches, TLBs, microcode ROM and the bus bridge; the L2 cache (675
+The CPU column includes its caches, TLBs, microcode ROM and the bus bridge; the L2 cache (691
 ALMs, 32 M10K) is part of the system.
 
 ## Credits and license
@@ -103,7 +103,7 @@ MiSTer port of the ao486 core originally written by Aleksander Osman, which has 
 Original Core [repository](https://github.com/alfikpl/ao486)
 
 ## Features:
-* TetriumSX CPU at 69 MHz, about 1.8-3x the speed of ao486's CPU (no FPU).
+* TetriumSX CPU at 69 MHz, about 1.9-3x the speed of ao486's CPU (no FPU).
 * 256MB RAM
 * SVGA with up to 1280x1024@256, 1024x768@64K, 640x480@16M resolutions
 * Sound Blaster 16 (DSP v4.05) and Sound Blaster Pro (DSP v3.02) with OPL3 and C/MS
